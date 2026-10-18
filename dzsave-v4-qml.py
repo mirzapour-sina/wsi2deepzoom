@@ -12,6 +12,7 @@ import dzsave_v4_gui_common as common
 
 class DzSaveController(QObject):
     fieldsChanged = Signal()
+    destinationsChanged = Signal()
     filesChanged = Signal()
     selectionChanged = Signal()
     statusChanged = Signal()
@@ -24,11 +25,14 @@ class DzSaveController(QObject):
         super().__init__()
         self.events = queue.Queue()
         self._fields = dict(common.DEFAULTS)
+        self._destinations = list(common.DEFAULT_DESTINATIONS)
         self._files = []
         self._status = "Ready. Scan for TIFF files or start conversion."
         self._log = ""
         self._progress = 0
         self._progress_max = 1
+        self._stage_progress = 0
+        self._progress_description = "Ready"
         self._busy = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)
@@ -37,6 +41,37 @@ class DzSaveController(QObject):
     @Property("QVariantMap", notify=fieldsChanged)
     def fields(self):
         return dict(self._fields)
+
+    @Property("QVariantList", notify=destinationsChanged)
+    def destinations(self):
+        return list(self._destinations)
+
+    @Slot()
+    def addDestination(self):
+        self._destinations.append("")
+        self.destinationsChanged.emit()
+
+    @Slot(int)
+    def removeDestination(self, index):
+        if len(self._destinations) > 1 and 0 <= index < len(self._destinations):
+            self._destinations.pop(index)
+            self.destinationsChanged.emit()
+
+    @Slot(int, str)
+    def setDestination(self, index, path):
+        if 0 <= index < len(self._destinations):
+            self._destinations[index] = path
+            self.destinationsChanged.emit()
+
+    @Slot(int)
+    def browseDestination(self, index):
+        if not 0 <= index < len(self._destinations):
+            return
+        selected = QFileDialog.getExistingDirectory(
+            None, "Select destination folder", self._destinations[index]
+        )
+        if selected:
+            self.setDestination(index, selected)
 
     @Property("QVariantList", notify=filesChanged)
     def scannedFiles(self):
@@ -103,6 +138,14 @@ class DzSaveController(QObject):
     def progressMaximum(self):
         return self._progress_max
 
+    @Property(float, notify=progressChanged)
+    def stageProgress(self):
+        return self._stage_progress
+
+    @Property(str, notify=progressChanged)
+    def progressDescription(self):
+        return self._progress_description
+
     @Property(bool, notify=busyChanged)
     def isBusy(self):
         return self._busy
@@ -143,7 +186,11 @@ class DzSaveController(QObject):
         if self._busy:
             return
         try:
-            settings = common.validate_settings(self._fields, self._selected_files())
+            settings = common.validate_settings(
+                self._fields,
+                self._selected_files(),
+                self._destinations,
+            )
         except ValueError as error:
             QMessageBox.critical(None, "Check settings", str(error))
             return
@@ -151,6 +198,8 @@ class DzSaveController(QObject):
         self._set_busy(True)
         self._progress = 0
         self._progress_max = 1
+        self._stage_progress = 0
+        self._progress_description = "Starting conversion"
         self.progressChanged.emit()
         self._status = "Conversion running..."
         self.statusChanged.emit()
@@ -168,12 +217,14 @@ class DzSaveController(QObject):
             if event == "log":
                 self._append_log(payload)
             elif event == "progress":
-                self._progress, self._progress_max, percentage = payload
+                files_total = max(1, payload["files_total"])
+                overall = payload["completed_files"] + payload["stage_value"] / 4
+                self._progress = round(min(files_total, overall) * 100)
+                self._progress_max = files_total * 100
+                self._stage_progress = payload["stage_value"]
+                self._progress_description = payload["message"]
                 self.progressChanged.emit()
-                self._status = (
-                    f"Completed {self._progress} of {self._progress_max} "
-                    f"files ({percentage}%)."
-                )
+                self._status = payload["message"]
                 self.statusChanged.emit()
             elif event == "scan_done":
                 self._set_busy(False)

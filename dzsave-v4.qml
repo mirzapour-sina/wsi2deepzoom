@@ -6,9 +6,9 @@ ApplicationWindow {
     id: window
     visible: true
     width: 1000
-    height: 900
+    height: 980
     minimumWidth: 780
-    minimumHeight: 680
+    minimumHeight: 740
     title: "WSI DeepZoom Converter - QML"
 
     ColumnLayout {
@@ -31,40 +31,56 @@ ApplicationWindow {
             title: "Folders"
             Layout.fillWidth: true
 
-            GridLayout {
+            ColumnLayout {
                 anchors.fill: parent
-                columns: 3
-                columnSpacing: 8
-                rowSpacing: 6
+
+                RowLayout {
+                    Label {
+                        text: "Source WSI folder"
+                        Layout.preferredWidth: 180
+                    }
+                    TextField {
+                        text: controller.fields["input_dir"]
+                        onTextEdited: controller.setField("input_dir", text)
+                        Layout.fillWidth: true
+                    }
+                    Button {
+                        text: "Browse..."
+                        onClicked: controller.browse("input_dir")
+                    }
+                }
 
                 Repeater {
-                    model: [
-                        { key: "input_dir", label: "Source WSI folder" },
-                        { key: "primary_dir", label: "Primary destination" },
-                        { key: "secondary_dir", label: "Secondary destination" }
-                    ]
-
+                    model: controller.destinations
                     delegate: RowLayout {
-                        required property var modelData
-                        Layout.columnSpan: 3
+                        required property int index
+                        required property string modelData
                         Layout.fillWidth: true
 
                         Label {
-                            text: modelData.label
+                            text: "Destination " + (index + 1)
                             Layout.preferredWidth: 180
                         }
-
                         TextField {
-                            text: controller.fields[modelData.key]
-                            onTextEdited: controller.setField(modelData.key, text)
+                            text: modelData
+                            onEditingFinished: controller.setDestination(index, text)
                             Layout.fillWidth: true
                         }
-
                         Button {
                             text: "Browse..."
-                            onClicked: controller.browse(modelData.key)
+                            onClicked: controller.browseDestination(index)
+                        }
+                        Button {
+                            text: "Remove"
+                            enabled: controller.destinations.length > 1
+                            onClicked: controller.removeDestination(index)
                         }
                     }
+                }
+                Button {
+                    text: "Add destination"
+                    onClicked: controller.addDestination()
+                    Layout.alignment: Qt.AlignRight
                 }
             }
         }
@@ -195,11 +211,29 @@ ApplicationWindow {
             }
         }
 
-        ProgressBar {
-            from: 0
-            to: Math.max(1, controller.progressMaximum)
-            value: controller.progressValue
+        GroupBox {
+            title: "Conversion progress"
             Layout.fillWidth: true
+            ColumnLayout {
+                anchors.fill: parent
+                Label {
+                    text: controller.progressDescription
+                    Layout.fillWidth: true
+                }
+                ProgressBar {
+                    from: 0
+                    to: Math.max(1, controller.progressMaximum)
+                    value: controller.progressValue
+                    Layout.fillWidth: true
+                }
+                Label { text: "Current slide" }
+                ProgressBar {
+                    from: 0
+                    to: 4
+                    value: controller.stageProgress
+                    Layout.fillWidth: true
+                }
+            }
         }
 
         RowLayout {

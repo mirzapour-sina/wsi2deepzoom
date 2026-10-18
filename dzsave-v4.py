@@ -71,6 +71,31 @@ ROBOCOPY_RETRIES = 2
 
 ROBOCOPY_WAIT = 1
 SELECTED_FILES = None
+DESTINATION_DIRS = None
+PROGRESS_CALLBACK = None
+PROGRESS_FILE_INDEX = 0
+PROGRESS_FILE_TOTAL = 0
+
+
+def report_progress(stage, current, total, input_file=None, message=""):
+    if PROGRESS_CALLBACK is not None:
+        PROGRESS_CALLBACK(
+            {
+                "stage": stage,
+                "stage_value": current,
+                "current": current,
+                "total": total,
+                "file": str(input_file) if input_file is not None else "",
+                "message": message,
+                "file_index": PROGRESS_FILE_INDEX,
+                "files_total": PROGRESS_FILE_TOTAL,
+                "completed_files": (
+                    PROGRESS_FILE_INDEX
+                    if stage in {"complete", "error", "finished"}
+                    else max(0, PROGRESS_FILE_INDEX - 1)
+                ),
+            }
+        )
 
 
 # =========================================================
@@ -397,10 +422,11 @@ def convert_wsi(
     Also generates a separate gallery thumbnail.
 
     Then copies the DeepZoom and thumbnail
-    to the secondary location.
+    to any additional destinations.
     """
 
     wsi_start = time.perf_counter()
+    report_progress("preparing", 0, 4, input_file, "Preparing slide")
 
     folder_name = input_file.parent.name
 
@@ -410,10 +436,12 @@ def convert_wsi(
     # Primary output
     # -----------------------------------------------------
 
-    primary_folder = (
-        PRIMARY_OUTPUT_DIR
-        / folder_name
+    destination_dirs = (
+        DESTINATION_DIRS
+        if DESTINATION_DIRS is not None
+        else [PRIMARY_OUTPUT_DIR, SECONDARY_OUTPUT_DIR]
     )
+    primary_folder = destination_dirs[0] / folder_name
 
     primary_output = (
         primary_folder
@@ -425,19 +453,10 @@ def convert_wsi(
         / "thumbnail.jpg"
     )
 
-    # -----------------------------------------------------
-    # Secondary output
-    # -----------------------------------------------------
-
-    secondary_folder = (
-        SECONDARY_OUTPUT_DIR
-        / folder_name
-    )
-
-    secondary_output = (
-        secondary_folder
-        / wsi_name
-    )
+    additional_outputs = [
+        (destination_dir / folder_name, destination_dir / folder_name / wsi_name)
+        for destination_dir in destination_dirs[1:]
+    ]
 
     # -----------------------------------------------------
     # Header
@@ -471,11 +490,12 @@ def convert_wsi(
         f"\n  {primary_thumbnail}"
     )
 
-    print()
-    print(
-        f"Secondary:"
-        f"\n  {secondary_output}.dzi"
-    )
+    for destination_folder, destination_output in additional_outputs:
+        print()
+        print(
+            f"Additional destination:"
+            f"\n  {destination_output}.dzi"
+        )
 
     try:
 
@@ -500,6 +520,7 @@ def convert_wsi(
         # =================================================
 
         if dz_exists:
+            report_progress("deepzoom", 1, 4, input_file, "DeepZoom already exists")
 
             print()
             print(
@@ -511,6 +532,7 @@ def convert_wsi(
             )
 
         else:
+            report_progress("deepzoom", 1, 4, input_file, "Converting to DeepZoom")
 
             print()
             print(
@@ -586,6 +608,7 @@ def convert_wsi(
         # =================================================
 
         if thumb_exists:
+            report_progress("thumbnail", 2, 4, input_file, "Thumbnail already exists")
 
             print()
             print(
@@ -597,6 +620,7 @@ def convert_wsi(
             )
 
         else:
+            report_progress("thumbnail", 2, 4, input_file, "Creating thumbnail")
 
             print()
             print(
@@ -654,50 +678,41 @@ def convert_wsi(
 
         # =================================================
         # STEP 3
-        # Copy to secondary location
+        # Copy to additional destinations
         # =================================================
 
         print()
 
-        secondary_exists = deepzoom_exists(
-            secondary_output
-        )
-
-        secondary_thumbnail_exists = (
-            secondary_folder / "thumbnail.jpg"
-        ).exists()
-
-        if (
-            secondary_exists
-            and secondary_thumbnail_exists
+        copy_elapsed = 0
+        for index, (destination_folder, destination_output) in enumerate(
+            additional_outputs, start=1
         ):
-
-            print(
-                "Secondary DeepZoom and "
-                "thumbnail already exist."
+            report_progress(
+                "copy",
+                2 + index / max(1, len(additional_outputs)),
+                4,
+                input_file,
+                f"Copying to destination {index} of {len(additional_outputs)}",
             )
+            secondary_exists = deepzoom_exists(destination_output)
+            secondary_thumbnail_exists = (
+                destination_folder / "thumbnail.jpg"
+            ).exists()
 
-            print(
-                "Skipping copy."
-            )
+            if secondary_exists and secondary_thumbnail_exists:
+                print(
+                    f"DeepZoom and thumbnail already exist at "
+                    f"{destination_folder}. Skipping copy."
+                )
+                continue
 
-            copy_elapsed = 0
-
-        else:
-
-            copy_elapsed = copy_deepzoom(
-                primary_output,
-                secondary_output,
-            )
-
+            copy_elapsed += copy_deepzoom(primary_output, destination_output)
             print()
-            print(
-                "DeepZoom copy complete."
-            )
-
-            print(
-                f"Copy time: "
-                f"{format_time(copy_elapsed)}"
+            print(f"DeepZoom copy complete: {destination_output}.dzi")
+            print(f"Copy time: {format_time(copy_elapsed)}")
+        if not additional_outputs:
+            report_progress(
+                "copy", 3, 4, input_file, "No additional destinations to copy"
             )
 
         # =================================================
@@ -713,6 +728,7 @@ def convert_wsi(
         print(
             f"[{current}/{total}] COMPLETE"
         )
+        report_progress("complete", 4, 4, input_file, "Slide complete")
 
         print(
             f"  Conversion : "
@@ -737,6 +753,7 @@ def convert_wsi(
         return wsi_elapsed
 
     except Exception as e:
+        report_progress("error", 4, 4, input_file, "Slide failed")
 
         wsi_elapsed = (
             time.perf_counter()
@@ -774,6 +791,7 @@ def convert_wsi(
 # =========================================================
 
 def main():
+    global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
 
     total_start = time.perf_counter()
 
@@ -789,16 +807,14 @@ def main():
     )
 
     print()
-    print(
-        f"Primary output:"
-        f"\n  {PRIMARY_OUTPUT_DIR}"
+    print("Output destinations:")
+    output_destinations = (
+        DESTINATION_DIRS
+        if DESTINATION_DIRS is not None
+        else [PRIMARY_OUTPUT_DIR, SECONDARY_OUTPUT_DIR]
     )
-
-    print()
-    print(
-        f"Secondary output:"
-        f"\n  {SECONDARY_OUTPUT_DIR}"
-    )
+    for destination_dir in output_destinations:
+        print(f"  {destination_dir}")
 
     print()
     print(
@@ -845,6 +861,7 @@ def main():
         tiff_files = sorted(Path(path) for path in SELECTED_FILES)
 
     total = len(tiff_files)
+    report_progress("ready", 0, 4, message=f"Found {total} slide(s)")
 
     print()
     print(
@@ -877,6 +894,15 @@ def main():
         tiff_files,
         start=1,
     ):
+        PROGRESS_FILE_INDEX = current
+        PROGRESS_FILE_TOTAL = total
+        report_progress(
+            "preparing",
+            0,
+            4,
+            input_file,
+            f"Starting slide {current} of {total}",
+        )
 
         elapsed = convert_wsi(
             input_file,
@@ -908,6 +934,13 @@ def main():
         percentage = (
             current / total
         ) * 100
+        report_progress(
+            "complete" if elapsed is not None else "error",
+            4,
+            4,
+            input_file,
+            f"Completed {current} of {total} slides",
+        )
 
         print()
         print(
@@ -933,6 +966,7 @@ def main():
     print()
     print()
     print("=" * 80)
+    report_progress("finished", 4, 4, message="All selected slides processed")
     print("ALL CONVERSIONS FINISHED")
     print("=" * 80)
 

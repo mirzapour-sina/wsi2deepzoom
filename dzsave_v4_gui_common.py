@@ -2,7 +2,6 @@ from pathlib import Path
 import importlib.util
 import os
 import queue
-import re
 import sys
 import threading
 from contextlib import redirect_stdout
@@ -36,8 +35,6 @@ CONVERTER_PATH = APP_DIR / "dzsave-v4.py"
 _VIPS_DLL_HANDLES = []
 DEFAULTS = {
     "input_dir": r"D:\Edupat\Urmia-Medical-University\WSI",
-    "primary_dir": r"D:\Edupat\Deepzoom",
-    "secondary_dir": r"D:\Edupat\Urmia-Medical-University\Deepzoom",
     "jpeg_quality": "85",
     "thumbnail_size": "600",
     "thumbnail_quality": "85",
@@ -45,9 +42,7 @@ DEFAULTS = {
     "robocopy_retries": "2",
     "robocopy_wait": "1",
 }
-
-PROGRESS_RE = re.compile(r"Overall progress:\s*(\d+)/(\d+)\s*\(([\d.]+)%\)")
-
+DEFAULT_DESTINATIONS = [r"D:\Edupat\Deepzoom"]
 
 def find_wsi_files(input_dir):
     input_dir = Path(input_dir).expanduser()
@@ -60,17 +55,27 @@ def find_wsi_files(input_dir):
     )
 
 
-def validate_settings(values, selected_files=None):
+def validate_settings(values, selected_files=None, destinations=None):
     input_dir = Path(values["input_dir"]).expanduser()
     if not input_dir.is_dir():
         raise ValueError("Select an existing input folder.")
 
-    output_dirs = {}
-    for key in ("primary_dir", "secondary_dir"):
-        raw_path = values[key].strip()
+    if destinations is None:
+        destinations = DEFAULT_DESTINATIONS
+    output_dirs = []
+    normalized_destinations = set()
+    for raw_path in destinations:
+        raw_path = str(raw_path).strip()
         if not raw_path:
-            raise ValueError("Select both output folders.")
-        output_dirs[key] = Path(raw_path).expanduser()
+            raise ValueError("Remove empty destination folders or select a folder.")
+        output_dir = Path(raw_path).expanduser()
+        normalized_path = os.path.normcase(os.path.abspath(output_dir))
+        if normalized_path in normalized_destinations:
+            raise ValueError(f"Destination folder is listed more than once: {output_dir}")
+        normalized_destinations.add(normalized_path)
+        output_dirs.append(output_dir)
+    if not output_dirs:
+        raise ValueError("Add at least one destination folder.")
 
     try:
         settings = {
@@ -95,8 +100,8 @@ def validate_settings(values, selected_files=None):
     if settings["robocopy_retries"] < 0 or settings["robocopy_wait"] < 0:
         raise ValueError("Copy retries and retry wait cannot be negative.")
 
-    settings.update(output_dirs)
     settings["input_dir"] = input_dir
+    settings["destinations"] = output_dirs
     if selected_files is not None:
         normalized_files = []
         for file_path in selected_files:
@@ -134,12 +139,9 @@ class QueueWriter:
             self.buffer = ""
 
     def _send_line(self, line):
+        if line.startswith("Overall progress:"):
+            return
         self.events.put(("log", line))
-        match = PROGRESS_RE.search(line)
-        if match:
-            self.events.put(
-                ("progress", (int(match.group(1)), int(match.group(2)), match.group(3)))
-            )
 
 
 def run_conversion(settings, events):
@@ -160,8 +162,7 @@ def run_conversion(settings, events):
             spec.loader.exec_module(converter)
 
             converter.INPUT_DIR = settings["input_dir"]
-            converter.PRIMARY_OUTPUT_DIR = settings["primary_dir"]
-            converter.SECONDARY_OUTPUT_DIR = settings["secondary_dir"]
+            converter.DESTINATION_DIRS = settings["destinations"]
             converter.JPEG_QUALITY = settings["jpeg_quality"]
             converter.THUMBNAIL_SIZE = settings["thumbnail_size"]
             converter.THUMBNAIL_QUALITY = settings["thumbnail_quality"]
@@ -169,6 +170,9 @@ def run_conversion(settings, events):
             converter.ROBOCOPY_RETRIES = settings["robocopy_retries"]
             converter.ROBOCOPY_WAIT = settings["robocopy_wait"]
             converter.SELECTED_FILES = settings.get("selected_files")
+            converter.PROGRESS_CALLBACK = lambda progress: events.put(
+                ("progress", progress)
+            )
 
             with redirect_stdout(QueueWriter(events)):
                 converter.main()

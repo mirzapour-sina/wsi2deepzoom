@@ -13,14 +13,17 @@ class DzSaveWindow:
         self.events = queue.Queue()
         self.busy = False
         self.scanned_files = []
+        self.destinations = [
+            tk.StringVar(value=path) for path in common.DEFAULT_DESTINATIONS
+        ]
         self.values = {
             key: tk.StringVar(value=value)
             for key, value in common.DEFAULTS.items()
         }
 
         root.title("WSI DeepZoom Converter - Tkinter")
-        root.geometry("1000x900")
-        root.minsize(780, 680)
+        root.geometry("1000x980")
+        root.minsize(780, 740)
 
         self._build()
         root.after(100, self._poll_events)
@@ -41,14 +44,20 @@ class DzSaveWindow:
         folders = ttk.LabelFrame(main, text="Folders", padding=10)
         folders.grid(row=2, column=0, sticky="ew")
         folders.columnconfigure(1, weight=1)
-        for row, (key, label) in enumerate(
-            (
-                ("input_dir", "Source WSI folder"),
-                ("primary_dir", "Primary destination"),
-                ("secondary_dir", "Secondary destination"),
-            )
-        ):
-            self._path_row(folders, row, key, label)
+        self._path_row(folders, 0, "input_dir", "Source WSI folder")
+        destinations = ttk.LabelFrame(folders, text="Output destinations", padding=6)
+        destinations.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        destinations.columnconfigure(0, weight=1)
+        self.destinations_frame = ttk.Frame(destinations)
+        self.destinations_frame.grid(row=0, column=0, sticky="ew")
+        self.destinations_frame.columnconfigure(1, weight=1)
+        self.add_destination_button = ttk.Button(
+            destinations,
+            text="Add destination",
+            command=self._add_destination,
+        )
+        self.add_destination_button.grid(row=1, column=0, sticky="e", pady=(5, 0))
+        self._render_destinations()
 
         settings = ttk.LabelFrame(main, text="Conversion and thumbnail settings", padding=10)
         settings.grid(row=3, column=0, sticky="new", pady=(12, 0))
@@ -133,8 +142,22 @@ class DzSaveWindow:
         self.log.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
 
-        self.progress = ttk.Progressbar(main, mode="determinate")
-        self.progress.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        progress_frame = ttk.LabelFrame(main, text="Conversion progress", padding=8)
+        progress_frame.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        progress_frame.columnconfigure(0, weight=1)
+        self.progress_status = tk.StringVar(value="Ready")
+        ttk.Label(progress_frame, textvariable=self.progress_status).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.progress = ttk.Progressbar(progress_frame, mode="determinate")
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        ttk.Label(progress_frame, text="Current slide").grid(
+            row=2, column=0, sticky="w"
+        )
+        self.stage_progress = ttk.Progressbar(
+            progress_frame, mode="determinate", maximum=4
+        )
+        self.stage_progress.grid(row=3, column=0, sticky="ew", pady=(4, 0))
         buttons = ttk.Frame(main)
         buttons.grid(row=8, column=0, sticky="e", pady=(10, 0))
         self.scan_button = ttk.Button(buttons, text="Scan files", command=self.scan)
@@ -156,6 +179,42 @@ class DzSaveWindow:
             text="Browse...",
             command=lambda: self._browse(key),
         ).grid(row=row, column=2, padx=(8, 0), pady=4)
+
+    def _render_destinations(self):
+        for child in self.destinations_frame.winfo_children():
+            child.destroy()
+        for index, value in enumerate(self.destinations):
+            ttk.Label(self.destinations_frame, text=f"Destination {index + 1}").grid(
+                row=index, column=0, sticky="w", padx=(0, 10), pady=3
+            )
+            ttk.Entry(self.destinations_frame, textvariable=value).grid(
+                row=index, column=1, sticky="ew", pady=3
+            )
+            ttk.Button(
+                self.destinations_frame,
+                text="Browse...",
+                command=lambda path=value: self._browse_destination(path),
+            ).grid(row=index, column=2, padx=(8, 0), pady=3)
+            ttk.Button(
+                self.destinations_frame,
+                text="Remove",
+                command=lambda item=value: self._remove_destination(item),
+                state=tk.NORMAL if len(self.destinations) > 1 else tk.DISABLED,
+            ).grid(row=index, column=3, padx=(6, 0), pady=3)
+
+    def _browse_destination(self, value):
+        selected = filedialog.askdirectory(initialdir=value.get())
+        if selected:
+            value.set(selected)
+
+    def _add_destination(self):
+        self.destinations.append(tk.StringVar())
+        self._render_destinations()
+
+    def _remove_destination(self, value):
+        if len(self.destinations) > 1:
+            self.destinations.remove(value)
+            self._render_destinations()
 
     def _browse(self, key):
         selected = filedialog.askdirectory(initialdir=self.values[key].get())
@@ -202,6 +261,7 @@ class DzSaveWindow:
             settings = common.validate_settings(
                 {key: variable.get() for key, variable in self.values.items()},
                 self._selected_files(),
+                [destination.get() for destination in self.destinations],
             )
         except ValueError as error:
             messagebox.showerror("Check settings", str(error))
@@ -209,6 +269,8 @@ class DzSaveWindow:
 
         self._set_busy(True)
         self.progress.configure(maximum=1, value=0)
+        self.stage_progress.configure(value=0)
+        self.progress_status.set("Starting conversion")
         self.status.set("Conversion running...")
         self._append_log("Starting conversion...\n")
         common.run_conversion(settings, self.events)
@@ -223,11 +285,17 @@ class DzSaveWindow:
             if event == "log":
                 self._append_log(payload)
             elif event == "progress":
-                current, total, percentage = payload
-                self.progress.configure(maximum=total, value=current)
-                self.status.set(
-                    f"Completed {current} of {total} files ({percentage}%)."
+                total = max(1, payload["files_total"])
+                overall = (
+                    payload["completed_files"] + payload["stage_value"] / 4
                 )
+                self.progress.configure(maximum=total, value=min(total, overall))
+                self.stage_progress.configure(value=payload["stage_value"])
+                self.progress_status.set(
+                    f"{payload['message']} — "
+                    f"{payload['completed_files']} of {payload['files_total']} files complete"
+                )
+                self.status.set(payload["message"])
             elif event == "scan_done":
                 self._set_busy(False)
                 if payload is not None:
@@ -243,6 +311,7 @@ class DzSaveWindow:
                 messagebox.showerror("Operation failed", payload)
             elif event == "done":
                 self._set_busy(False)
+                self.stage_progress.configure(value=4)
                 self.status.set("Conversion finished. See the activity log for details.")
 
         self.root.after(100, self._poll_events)

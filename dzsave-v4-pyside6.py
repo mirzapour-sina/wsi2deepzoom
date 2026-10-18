@@ -32,13 +32,15 @@ class DzSaveWindow(QMainWindow):
         self.events = queue.Queue()
         self.busy = False
         self.scanned_files = []
+        self.destination_values = list(common.DEFAULT_DESTINATIONS)
+        self.destination_fields = []
         self.fields = {
             key: QLineEdit(value)
             for key, value in common.DEFAULTS.items()
         }
         self.setWindowTitle("WSI DeepZoom Converter - PySide6")
-        self.resize(1000, 900)
-        self.setMinimumSize(780, 680)
+        self.resize(1000, 980)
+        self.setMinimumSize(780, 740)
         self._build()
 
         self.timer = QTimer(self)
@@ -62,8 +64,6 @@ class DzSaveWindow(QMainWindow):
         for row, (key, label) in enumerate(
             (
                 ("input_dir", "Source WSI folder"),
-                ("primary_dir", "Primary destination"),
-                ("secondary_dir", "Secondary destination"),
             )
         ):
             folder_layout.addWidget(QLabel(label), row, 0)
@@ -73,6 +73,11 @@ class DzSaveWindow(QMainWindow):
             folder_layout.addWidget(browse, row, 2)
         folder_layout.setColumnStretch(1, 1)
         layout.addWidget(folders)
+
+        destinations = QGroupBox("Output destinations")
+        self.destinations_layout = QVBoxLayout(destinations)
+        self._render_destinations()
+        layout.addWidget(destinations)
 
         settings_box = QGroupBox("Conversion and thumbnail settings")
         settings_layout = QFormLayout(settings_box)
@@ -124,10 +129,20 @@ class DzSaveWindow(QMainWindow):
         activity_layout.addWidget(self.log, 1)
         layout.addWidget(activity, 1)
 
+        progress_box = QGroupBox("Conversion progress")
+        progress_layout = QVBoxLayout(progress_box)
+        self.progress_status = QLabel("Ready")
+        progress_layout.addWidget(self.progress_status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        layout.addWidget(self.progress)
+        progress_layout.addWidget(self.progress)
+        progress_layout.addWidget(QLabel("Current slide"))
+        self.stage_progress = QProgressBar()
+        self.stage_progress.setRange(0, 400)
+        self.stage_progress.setFormat("%p%")
+        progress_layout.addWidget(self.stage_progress)
+        layout.addWidget(progress_box)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         self.scan_button = QPushButton("Scan files")
@@ -144,6 +159,58 @@ class DzSaveWindow(QMainWindow):
         )
         if folder:
             self.fields[key].setText(folder)
+
+    def _capture_destinations(self):
+        self.destination_values = [
+            field.text() for field in self.destination_fields
+        ]
+
+    def _render_destinations(self):
+        while self.destinations_layout.count():
+            item = self.destinations_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.destination_fields = []
+        for index, value in enumerate(self.destination_values):
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.addWidget(QLabel(f"Destination {index + 1}"))
+            field = QLineEdit(value)
+            self.destination_fields.append(field)
+            row.addWidget(field, 1)
+            browse = QPushButton("Browse...")
+            browse.clicked.connect(
+                lambda checked=False, current=index: self._browse_destination(current)
+            )
+            row.addWidget(browse)
+            remove = QPushButton("Remove")
+            remove.setEnabled(len(self.destination_values) > 1)
+            remove.clicked.connect(
+                lambda checked=False, current=index: self._remove_destination(current)
+            )
+            row.addWidget(remove)
+            self.destinations_layout.addWidget(row_widget)
+        add = QPushButton("Add destination")
+        add.clicked.connect(self._add_destination)
+        self.destinations_layout.addWidget(add)
+
+    def _browse_destination(self, index):
+        field = self.destination_fields[index]
+        folder = QFileDialog.getExistingDirectory(self, "Select folder", field.text())
+        if folder:
+            field.setText(folder)
+
+    def _add_destination(self):
+        self._capture_destinations()
+        self.destination_values.append("")
+        self._render_destinations()
+
+    def _remove_destination(self, index):
+        if len(self.destination_values) > 1:
+            self._capture_destinations()
+            self.destination_values.pop(index)
+            self._render_destinations()
 
     def _set_busy(self, busy):
         self.busy = busy
@@ -200,6 +267,7 @@ class DzSaveWindow(QMainWindow):
             settings = common.validate_settings(
                 {key: field.text() for key, field in self.fields.items()},
                 self._selected_files(),
+                [field.text() for field in self.destination_fields],
             )
         except ValueError as error:
             QMessageBox.critical(self, "Check settings", str(error))
@@ -208,6 +276,8 @@ class DzSaveWindow(QMainWindow):
         self._set_busy(True)
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
+        self.stage_progress.setValue(0)
+        self.progress_status.setText("Starting conversion")
         self.status.setText("Conversion running...")
         self.log.append("Starting conversion...")
         common.run_conversion(settings, self.events)
@@ -226,12 +296,18 @@ class DzSaveWindow(QMainWindow):
                 self.log.insertPlainText(payload)
                 self.log.ensureCursorVisible()
             elif event == "progress":
-                current, total, percentage = payload
-                self.progress.setRange(0, total)
-                self.progress.setValue(current)
-                self.status.setText(
-                    f"Completed {current} of {total} files ({percentage}%)."
+                total = max(1, payload["files_total"])
+                overall = (
+                    payload["completed_files"] + payload["stage_value"] / 4
                 )
+                self.progress.setRange(0, total * 100)
+                self.progress.setValue(round(min(total, overall) * 100))
+                self.stage_progress.setValue(round(payload["stage_value"] * 100))
+                self.progress_status.setText(
+                    f"{payload['message']} — "
+                    f"{payload['completed_files']} of {payload['files_total']} files complete"
+                )
+                self.status.setText(payload["message"])
             elif event == "scan_done":
                 self._set_busy(False)
                 if payload is not None:
@@ -252,6 +328,7 @@ class DzSaveWindow(QMainWindow):
                 QMessageBox.critical(self, "Operation failed", payload)
             elif event == "done":
                 self._set_busy(False)
+                self.stage_progress.setValue(4)
                 self.status.setText("Conversion finished. See the activity log for details.")
 
 

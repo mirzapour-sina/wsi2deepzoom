@@ -25,16 +25,25 @@ py -3.10 .\dzsave-v4-qml.py
 
 In the GUI:
 
-1. Set the source WSI folder and both output destinations.
-2. Set JPEG, thumbnail, and Robocopy options as needed.
-3. Click **Scan files**. The TIFF list is populated with all files checked.
-4. Check or uncheck individual files, or use **Select all / Select none**.
-5. Click **Start conversion**. Only checked files from the most recent scan
+1. Set the source WSI folder and the initial output destination.
+2. Use **Add destination** to copy output to additional folders, or **Remove**
+   to remove an extra destination. At least one destination is required.
+3. Set JPEG, thumbnail, and Robocopy options as needed.
+4. Click **Scan files**. The TIFF list is populated with all files checked.
+5. Check or uncheck individual files, or use **Select all / Select none**.
+6. Click **Start conversion**. Only checked files from the most recent scan
    are processed.
+
+The first destination is used for the DeepZoom conversion and thumbnail
+generation. Any additional destinations receive copies of that output.
 
 Selecting no files is rejected. A new scan replaces the file list and selects
 all discovered TIFFs. Scanning and conversion run in the background while the
 GUI remains responsive.
+
+During conversion, graphical progress bars show overall slide progress and
+the current slide's DeepZoom, thumbnail, and copy stages. The activity log is
+available for diagnostic details, not as the progress indicator.
 
 The command-line converter can still be started independently:
 

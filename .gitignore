@@ -1,0 +1,31 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build outputs and packaged executables
+/build/
+/dist/
+*.egg-info/
+*.spec
+
+# Local editor and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local logs
+*.log

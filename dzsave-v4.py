@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 import pyvips
 import shutil
 import subprocess
@@ -75,9 +76,13 @@ DESTINATION_DIRS = None
 PROGRESS_CALLBACK = None
 PROGRESS_FILE_INDEX = 0
 PROGRESS_FILE_TOTAL = 0
+LAST_CONVERSION_ERROR = None
+LAST_CONVERSION_DURATION = None
+LAST_CONVERSION_METRICS = {}
+RUN_START_PERF = None
 
 
-def report_progress(stage, current, total, input_file=None, message=""):
+def report_progress(stage, current, total, input_file=None, message="", metrics=None):
     if PROGRESS_CALLBACK is not None:
         PROGRESS_CALLBACK(
             {
@@ -93,6 +98,12 @@ def report_progress(stage, current, total, input_file=None, message=""):
                     PROGRESS_FILE_INDEX
                     if stage in {"complete", "error", "finished"}
                     else max(0, PROGRESS_FILE_INDEX - 1)
+                ),
+                "metrics": copy.deepcopy(metrics or {}),
+                "run_elapsed_seconds": (
+                    time.perf_counter() - RUN_START_PERF
+                    if RUN_START_PERF is not None
+                    else None
                 ),
             }
         )
@@ -425,8 +436,21 @@ def convert_wsi(
     to any additional destinations.
     """
 
+    global LAST_CONVERSION_METRICS
     wsi_start = time.perf_counter()
-    report_progress("preparing", 0, 4, input_file, "Preparing slide")
+    metrics = {
+        "resolution": "",
+        "load_seconds": None,
+        "deepzoom_seconds": None,
+        "thumbnail_seconds": None,
+        "copy_seconds": None,
+        "slide_seconds": None,
+        "deepzoom_status": "Pending",
+        "thumbnail_status": "Pending",
+        "copy_destinations": [],
+    }
+    LAST_CONVERSION_METRICS = metrics
+    report_progress("preparing", 0, 4, input_file, "Preparing slide", metrics)
 
     folder_name = input_file.parent.name
 
@@ -457,6 +481,14 @@ def convert_wsi(
         (destination_dir / folder_name, destination_dir / folder_name / wsi_name)
         for destination_dir in destination_dirs[1:]
     ]
+    metrics.update(
+        {
+            "input_file": str(input_file),
+            "deepzoom_output": f"{primary_output}.dzi",
+            "thumbnail_output": str(primary_thumbnail),
+            "copy_outputs": [str(output) + ".dzi" for _, output in additional_outputs],
+        }
+    )
 
     # -----------------------------------------------------
     # Header
@@ -464,7 +496,6 @@ def convert_wsi(
 
     print()
     print("=" * 80)
-
     print(
         f"[{current}/{total}] "
         f"{folder_name}/{input_file.name}"
@@ -499,6 +530,7 @@ def convert_wsi(
 
     try:
 
+        image = None
         conversion_elapsed = 0
         thumbnail_elapsed = 0
 
@@ -514,13 +546,36 @@ def convert_wsi(
             primary_folder
         )
 
+        load_start = time.perf_counter()
+        image = pyvips.Image.new_from_file(
+            str(input_file),
+            access="sequential",
+        )
+        load_elapsed = time.perf_counter() - load_start
+        metrics["resolution"] = f"{image.width:,} x {image.height:,}"
+        metrics["load_seconds"] = load_elapsed
+        report_progress(
+            "preparing",
+            0,
+            4,
+            input_file,
+            "Source image loaded",
+            metrics,
+        )
+        print(f"Image size: {image.width:,} x {image.height:,}")
+        print(f"Load time: {format_time(load_elapsed)}")
+
         # =================================================
         # STEP 1
         # DeepZoom conversion
         # =================================================
 
         if dz_exists:
-            report_progress("deepzoom", 1, 4, input_file, "DeepZoom already exists")
+            metrics["deepzoom_status"] = "Skipped (already exists)"
+
+            report_progress(
+                "deepzoom", 1, 4, input_file, "DeepZoom already exists", metrics
+            )
 
             print()
             print(
@@ -532,34 +587,9 @@ def convert_wsi(
             )
 
         else:
-            report_progress("deepzoom", 1, 4, input_file, "Converting to DeepZoom")
-
-            print()
-            print(
-                "Loading WSI..."
-            )
-
-            load_start = time.perf_counter()
-
-            image = pyvips.Image.new_from_file(
-                str(input_file),
-                access="sequential",
-            )
-
-            load_elapsed = (
-                time.perf_counter()
-                - load_start
-            )
-
-            print(
-                f"Image size: "
-                f"{image.width:,} x "
-                f"{image.height:,}"
-            )
-
-            print(
-                f"Load time: "
-                f"{format_time(load_elapsed)}"
+            metrics["deepzoom_status"] = "Converting"
+            report_progress(
+                "deepzoom", 1, 4, input_file, "Converting to DeepZoom", metrics
             )
 
             # ---------------------------------------------
@@ -591,6 +621,16 @@ def convert_wsi(
                 time.perf_counter()
                 - conversion_start
             )
+            metrics["deepzoom_seconds"] = conversion_elapsed
+            metrics["deepzoom_status"] = "Complete"
+            report_progress(
+                "deepzoom",
+                2,
+                4,
+                input_file,
+                "DeepZoom conversion complete",
+                metrics,
+            )
 
             print()
             print(
@@ -608,7 +648,10 @@ def convert_wsi(
         # =================================================
 
         if thumb_exists:
-            report_progress("thumbnail", 2, 4, input_file, "Thumbnail already exists")
+            metrics["thumbnail_status"] = "Skipped (already exists)"
+            report_progress(
+                "thumbnail", 2, 4, input_file, "Thumbnail already exists", metrics
+            )
 
             print()
             print(
@@ -620,7 +663,10 @@ def convert_wsi(
             )
 
         else:
-            report_progress("thumbnail", 2, 4, input_file, "Creating thumbnail")
+            metrics["thumbnail_status"] = "Creating"
+            report_progress(
+                "thumbnail", 2, 4, input_file, "Creating thumbnail", metrics
+            )
 
             print()
             print(
@@ -631,25 +677,6 @@ def convert_wsi(
                 time.perf_counter()
             )
 
-            # Load WSI if we skipped the
-            # DeepZoom conversion above.
-            if dz_exists:
-
-                print(
-                    "       Loading WSI for thumbnail..."
-                )
-
-                image = pyvips.Image.new_from_file(
-                    str(input_file),
-                    access="sequential",
-                )
-
-                print(
-                    f"       Image size: "
-                    f"{image.width:,} x "
-                    f"{image.height:,}"
-                )
-
             create_thumbnail(
                 image,
                 primary_thumbnail,
@@ -658,6 +685,16 @@ def convert_wsi(
             thumbnail_elapsed = (
                 time.perf_counter()
                 - thumbnail_start
+            )
+            metrics["thumbnail_seconds"] = thumbnail_elapsed
+            metrics["thumbnail_status"] = "Complete"
+            report_progress(
+                "thumbnail",
+                2,
+                4,
+                input_file,
+                "Thumbnail creation complete",
+                metrics,
             )
 
             print()
@@ -684,6 +721,7 @@ def convert_wsi(
         print()
 
         copy_elapsed = 0
+        copy_results = []
         for index, (destination_folder, destination_output) in enumerate(
             additional_outputs, start=1
         ):
@@ -693,6 +731,7 @@ def convert_wsi(
                 4,
                 input_file,
                 f"Copying to destination {index} of {len(additional_outputs)}",
+                metrics,
             )
             secondary_exists = deepzoom_exists(destination_output)
             secondary_thumbnail_exists = (
@@ -700,13 +739,41 @@ def convert_wsi(
             ).exists()
 
             if secondary_exists and secondary_thumbnail_exists:
+                copy_results.append(
+                    {
+                        "destination": str(destination_folder),
+                        "status": "Skipped (already exists)",
+                        "duration_seconds": 0,
+                    }
+                )
+                metrics["copy_destinations"] = copy_results
                 print(
                     f"DeepZoom and thumbnail already exist at "
                     f"{destination_folder}. Skipping copy."
                 )
                 continue
 
-            copy_elapsed += copy_deepzoom(primary_output, destination_output)
+            destination_copy_elapsed = copy_deepzoom(
+                primary_output, destination_output
+            )
+            copy_elapsed += destination_copy_elapsed
+            copy_results.append(
+                {
+                    "destination": str(destination_folder),
+                    "status": "Complete",
+                    "duration_seconds": destination_copy_elapsed,
+                }
+            )
+            metrics["copy_seconds"] = copy_elapsed
+            metrics["copy_destinations"] = copy_results
+            report_progress(
+                "copy",
+                3,
+                4,
+                input_file,
+                f"Destination {index} copy complete",
+                metrics,
+            )
             print()
             print(f"DeepZoom copy complete: {destination_output}.dzi")
             print(f"Copy time: {format_time(copy_elapsed)}")
@@ -723,12 +790,22 @@ def convert_wsi(
             time.perf_counter()
             - wsi_start
         )
+        metrics["copy_seconds"] = copy_elapsed
+        metrics["slide_seconds"] = wsi_elapsed
+        if not additional_outputs:
+            metrics["copy_destinations"] = []
+        if metrics["deepzoom_status"] == "Pending":
+            metrics["deepzoom_status"] = "Skipped"
+        if metrics["thumbnail_status"] == "Pending":
+            metrics["thumbnail_status"] = "Skipped"
 
         print()
         print(
             f"[{current}/{total}] COMPLETE"
         )
-        report_progress("complete", 4, 4, input_file, "Slide complete")
+        report_progress(
+            "complete", 4, 4, input_file, "Slide complete", metrics
+        )
 
         print(
             f"  Conversion : "
@@ -753,7 +830,12 @@ def convert_wsi(
         return wsi_elapsed
 
     except Exception as e:
-        report_progress("error", 4, 4, input_file, "Slide failed")
+        global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
+        LAST_CONVERSION_ERROR = str(e)
+        LAST_CONVERSION_DURATION = time.perf_counter() - wsi_start
+        metrics["slide_seconds"] = LAST_CONVERSION_DURATION
+        metrics["error"] = LAST_CONVERSION_ERROR
+        report_progress("error", 4, 4, input_file, "Slide failed", metrics)
 
         wsi_elapsed = (
             time.perf_counter()
@@ -791,9 +873,13 @@ def convert_wsi(
 # =========================================================
 
 def main():
+    global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
+    global LAST_CONVERSION_METRICS, RUN_START_PERF
     global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
 
     total_start = time.perf_counter()
+    RUN_START_PERF = total_start
+    run_started = time.strftime("%Y-%m-%d %H:%M:%S")
 
     print()
     print("=" * 80)
@@ -862,6 +948,10 @@ def main():
 
     total = len(tiff_files)
     report_progress("ready", 0, 4, message=f"Found {total} slide(s)")
+    completed = 0
+    failed = 0
+    results = []
+    processing_times = []
 
     print()
     print(
@@ -875,16 +965,19 @@ def main():
             "No TIFF files found."
         )
 
-        return
+        return {
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "duration_seconds": time.perf_counter() - total_start,
+            "results": results,
+            "started_at": run_started,
+            "average_seconds": None,
+        }
 
     # =====================================================
     # Statistics
     # =====================================================
-
-    completed = 0
-    failed = 0
-
-    processing_times = []
 
     # =====================================================
     # Process files
@@ -904,10 +997,26 @@ def main():
             f"Starting slide {current} of {total}",
         )
 
+        LAST_CONVERSION_ERROR = None
+        LAST_CONVERSION_DURATION = None
+        LAST_CONVERSION_METRICS = {}
         elapsed = convert_wsi(
             input_file,
             current,
             total,
+        )
+        results.append(
+            {
+                "file": str(input_file),
+                "status": "complete" if elapsed is not None else "failed",
+                "duration_seconds": (
+                    elapsed
+                    if elapsed is not None
+                    else LAST_CONVERSION_DURATION
+                ),
+                "error": LAST_CONVERSION_ERROR or "",
+                **LAST_CONVERSION_METRICS,
+            }
         )
 
         if elapsed is None:
@@ -1002,6 +1111,19 @@ def main():
 
     print()
     print("=" * 80)
+    return {
+        "total": total,
+        "completed": completed,
+        "failed": failed,
+        "duration_seconds": total_elapsed,
+        "average_seconds": (
+            sum(processing_times) / len(processing_times)
+            if processing_times
+            else None
+        ),
+        "results": results,
+        "started_at": run_started,
+    }
 
 
 # =========================================================

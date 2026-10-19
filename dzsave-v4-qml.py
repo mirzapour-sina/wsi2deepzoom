@@ -1,7 +1,7 @@
 import queue
 import sys
 import threading
-from pathlib import Path
+import time
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Property
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
@@ -20,6 +20,10 @@ class DzSaveController(QObject):
     progressChanged = Signal()
     busyChanged = Signal()
     errorRaised = Signal(str)
+    reportChanged = Signal()
+    activityChanged = Signal()
+    resultsChanged = Signal()
+    runSummaryChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -33,6 +37,23 @@ class DzSaveController(QObject):
         self._progress_max = 1
         self._stage_progress = 0
         self._progress_description = "Ready"
+        self._report_path = ""
+        self._report_info = "Reports will be saved in the first destination."
+        self._run_started_monotonic = None
+        self._activity = {
+            "file": "—",
+            "resolution": "—",
+            "load": "—",
+            "deepzoom": "—",
+            "thumbnail": "—",
+            "copy": "—",
+            "slide": "—",
+            "elapsed": "—",
+            "counts": "—",
+            "outputs": "—",
+        }
+        self._results = []
+        self._run_summary = "Started: — | Finished: — | Average per file: —"
         self._busy = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)
@@ -53,7 +74,7 @@ class DzSaveController(QObject):
 
     @Slot(int)
     def removeDestination(self, index):
-        if len(self._destinations) > 1 and 0 <= index < len(self._destinations):
+        if len(self._destinations) > 1 and 0 < index < len(self._destinations):
             self._destinations.pop(index)
             self.destinationsChanged.emit()
 
@@ -138,9 +159,19 @@ class DzSaveController(QObject):
     def progressMaximum(self):
         return self._progress_max
 
+    @Property(int, notify=progressChanged)
+    def progressPercent(self):
+        if self._progress_max <= 0:
+            return 0
+        return round(self._progress * 100 / self._progress_max)
+
     @Property(float, notify=progressChanged)
     def stageProgress(self):
         return self._stage_progress
+
+    @Property(int, notify=progressChanged)
+    def stagePercent(self):
+        return round(self._stage_progress * 25)
 
     @Property(str, notify=progressChanged)
     def progressDescription(self):
@@ -149,6 +180,33 @@ class DzSaveController(QObject):
     @Property(bool, notify=busyChanged)
     def isBusy(self):
         return self._busy
+
+    @Property(str, notify=reportChanged)
+    def reportInfo(self):
+        return self._report_info
+
+    @Property(str, notify=reportChanged)
+    def reportPath(self):
+        return self._report_path
+
+    @Property("QVariantMap", notify=activityChanged)
+    def activityDetails(self):
+        return dict(self._activity)
+
+    @Property("QVariantList", notify=resultsChanged)
+    def resultRows(self):
+        return list(self._results)
+
+    @Property(str, notify=runSummaryChanged)
+    def runSummary(self):
+        return self._run_summary
+
+    @Slot()
+    def openReport(self):
+        try:
+            common.open_report(self._report_path)
+        except (OSError, RuntimeError) as error:
+            self.errorRaised.emit(str(error))
 
     def _set_busy(self, busy):
         if self._busy != busy:
@@ -203,6 +261,19 @@ class DzSaveController(QObject):
         self.progressChanged.emit()
         self._status = "Conversion running..."
         self.statusChanged.emit()
+        self._report_path = ""
+        self._report_info = "Creating conversion log and Markdown report..."
+        self.reportChanged.emit()
+        self._run_started_monotonic = None
+        self._run_started_at = "—"
+        self._run_summary = "Started: — | Finished: — | Average per file: —"
+        self.runSummaryChanged.emit()
+        self._results = []
+        self.resultsChanged.emit()
+        self._activity = {
+            key: "—" for key in self._activity
+        }
+        self.activityChanged.emit()
         self._append_log("Starting conversion...\n")
         common.run_conversion(settings, self.events)
 
@@ -216,6 +287,17 @@ class DzSaveController(QObject):
 
             if event == "log":
                 self._append_log(payload)
+            elif event == "run_started":
+                self._run_started_monotonic = time.perf_counter()
+                self._run_started_at = payload.get("started_at", "—")
+                self._run_summary = (
+                    f"Started: {self._run_started_at} | Finished: In progress"
+                )
+                self.runSummaryChanged.emit()
+                self._report_info = (
+                    f"Log: {payload['log_path']} | Report: {payload['report_path']}"
+                )
+                self.reportChanged.emit()
             elif event == "progress":
                 files_total = max(1, payload["files_total"])
                 overall = payload["completed_files"] + payload["stage_value"] / 4
@@ -226,6 +308,71 @@ class DzSaveController(QObject):
                 self.progressChanged.emit()
                 self._status = payload["message"]
                 self.statusChanged.emit()
+                self._update_activity(payload)
+            elif event == "run_report":
+                summary = payload["summary"]
+                self._report_path = payload["report_path"]
+                self._report_info = (
+                    f"Report: {payload['report_path']} | Text log: {payload['log_path']}"
+                )
+                self.reportChanged.emit()
+                self._status = (
+                    f"Finished: {summary.get('completed', 0)} completed, "
+                    f"{summary.get('failed', 0)} failed."
+                )
+                self.statusChanged.emit()
+                self._activity["elapsed"] = common.format_duration(
+                    summary.get("duration_seconds")
+                )
+                self._activity["counts"] = (
+                    f"{summary.get('completed', 0)} completed / "
+                    f"{summary.get('failed', 0)} failed / "
+                    f"{summary.get('total', 0)} total"
+                )
+                self.activityChanged.emit()
+                self._run_summary = (
+                    f"Started: {self._run_started_at} | "
+                    f"Finished: {payload.get('finished_at', '—')} | "
+                    f"Total: {common.format_duration(summary.get('duration_seconds'))} | "
+                    f"Average per completed file: "
+                    f"{common.format_duration(summary.get('average_seconds'))}"
+                )
+                self.runSummaryChanged.emit()
+                self._results = [
+                    {
+                        "file": item.get("file", ""),
+                        "resolution": item.get("resolution") or "—",
+                        "load": common.format_duration(item.get("load_seconds")),
+                        "deepzoom": (
+                            f"{item.get('deepzoom_status', '—')} "
+                            f"({common.format_duration(item.get('deepzoom_seconds'))})"
+                        ),
+                        "thumbnail": (
+                            f"{item.get('thumbnail_status', '—')} "
+                            f"({common.format_duration(item.get('thumbnail_seconds'))})"
+                        ),
+                        "copy": common.format_duration(item.get("copy_seconds")),
+                        "total": common.format_duration(item.get("slide_seconds")),
+                        "status": item.get("status", ""),
+                        "copy_destinations": "; ".join(
+                            f"{copy.get('destination')}: {copy.get('status')} "
+                            f"({common.format_duration(copy.get('duration_seconds'))})"
+                            for copy in item.get("copy_destinations", [])
+                        ),
+                        "outputs": "; ".join(
+                            path
+                            for path in (
+                                item.get("deepzoom_output"),
+                                item.get("thumbnail_output"),
+                                *item.get("copy_outputs", []),
+                            )
+                            if path
+                        ),
+                        "error": item.get("error", ""),
+                    }
+                    for item in summary.get("results", [])
+                ]
+                self.resultsChanged.emit()
             elif event == "scan_done":
                 self._set_busy(False)
                 if payload is not None:
@@ -241,8 +388,52 @@ class DzSaveController(QObject):
                 self.errorRaised.emit(payload)
             elif event == "done":
                 self._set_busy(False)
-                self._status = "Conversion finished. See the activity log for details."
-                self.statusChanged.emit()
+                if not self._report_path:
+                    self._status = "Conversion ended. Review any error messages."
+                    self.statusChanged.emit()
+        if self._run_started_monotonic is not None and self._busy:
+            self._activity["elapsed"] = common.format_duration(
+                time.perf_counter() - self._run_started_monotonic
+            )
+            self.activityChanged.emit()
+
+    def _update_activity(self, payload):
+        metrics = payload.get("metrics", {})
+        self._activity["file"] = payload.get("file") or "—"
+        self._activity["resolution"] = metrics.get("resolution") or "—"
+        self._activity["load"] = common.format_duration(metrics.get("load_seconds"))
+        self._activity["deepzoom"] = (
+            f"{metrics.get('deepzoom_status', 'Pending')} "
+            f"({common.format_duration(metrics.get('deepzoom_seconds'))})"
+        )
+        self._activity["thumbnail"] = (
+            f"{metrics.get('thumbnail_status', 'Pending')} "
+            f"({common.format_duration(metrics.get('thumbnail_seconds'))})"
+        )
+        copies = metrics.get("copy_destinations", [])
+        self._activity["copy"] = "; ".join(
+            f"{item['status']} {item['destination']} "
+            f"({common.format_duration(item.get('duration_seconds'))})"
+            for item in copies
+        ) or f"Total {common.format_duration(metrics.get('copy_seconds'))}"
+        self._activity["slide"] = common.format_duration(metrics.get("slide_seconds"))
+        self._activity["elapsed"] = common.format_duration(
+            payload.get("run_elapsed_seconds")
+        )
+        self._activity["counts"] = (
+            f"{payload.get('completed_files', 0)} completed / "
+            f"{payload.get('files_total', 0)} total"
+        )
+        self._activity["outputs"] = "\n".join(
+            path
+            for path in (
+                metrics.get("deepzoom_output"),
+                metrics.get("thumbnail_output"),
+                *metrics.get("copy_outputs", []),
+            )
+            if path
+        ) or "—"
+        self.activityChanged.emit()
 
 
 def main():

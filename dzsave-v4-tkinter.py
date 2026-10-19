@@ -1,6 +1,7 @@
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -12,6 +13,8 @@ class DzSaveWindow:
         self.root = root
         self.events = queue.Queue()
         self.busy = False
+        self.run_started_monotonic = None
+        self.run_started_at = "—"
         self.scanned_files = []
         self.destinations = [
             tk.StringVar(value=path) for path in common.DEFAULT_DESTINATIONS
@@ -29,8 +32,26 @@ class DzSaveWindow:
         root.after(100, self._poll_events)
 
     def _build(self):
-        main = ttk.Frame(self.root, padding=16)
-        main.pack(fill=tk.BOTH, expand=True)
+        page = ttk.Frame(self.root)
+        page.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(page, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(page, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        main = ttk.Frame(canvas, padding=16)
+        self.page_content = main
+        self.page_canvas = canvas
+        self.page_window = canvas.create_window((0, 0), window=main, anchor="nw")
+        main.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(self.page_window, width=event.width),
+        )
+        self.root.bind_all("<MouseWheel>", self._scroll_page)
         main.columnconfigure(0, weight=1)
 
         ttk.Label(main, text="WSI DeepZoom Converter", font=("Segoe UI", 18, "bold")).grid(
@@ -59,8 +80,33 @@ class DzSaveWindow:
         self.add_destination_button.grid(row=1, column=0, sticky="e", pady=(5, 0))
         self._render_destinations()
 
-        settings = ttk.LabelFrame(main, text="Conversion and thumbnail settings", padding=10)
-        settings.grid(row=3, column=0, sticky="new", pady=(12, 0))
+        self.options_visible = False
+        self.options_toggle = ttk.Button(
+            main,
+            text="Show DeepZoom and Robocopy options",
+            command=self._toggle_options,
+        )
+        self.options_toggle.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        options = ttk.Frame(main)
+        self.options_frame = options
+        options.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        options.grid_remove()
+        options.columnconfigure(0, weight=1)
+
+        settings = ttk.LabelFrame(options, padding=10)
+        self.settings_frame = settings
+        self.settings_toggle = ttk.Button(
+            options,
+            text="Show DeepZoom and thumbnail options",
+            command=lambda: self._toggle_grid_widget(
+                settings, self.settings_toggle,
+                "Show DeepZoom and thumbnail options",
+                "Hide DeepZoom and thumbnail options",
+            ),
+        )
+        self.settings_toggle.grid(row=0, column=0, sticky="w")
+        settings.grid(row=1, column=0, sticky="ew")
+        settings.grid_remove()
         setting_labels = (
             ("jpeg_quality", "DeepZoom JPEG quality"),
             ("thumbnail_size", "Thumbnail max size (px)"),
@@ -75,8 +121,19 @@ class DzSaveWindow:
                 fill=tk.X, pady=(4, 0)
             )
 
-        copy_settings = ttk.LabelFrame(main, text="Robocopy settings", padding=10)
-        copy_settings.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        copy_settings = ttk.LabelFrame(options, padding=10)
+        self.copy_settings_frame = copy_settings
+        self.copy_toggle = ttk.Button(
+            options,
+            text="Show Robocopy options",
+            command=lambda: self._toggle_grid_widget(
+                copy_settings, self.copy_toggle,
+                "Show Robocopy options", "Hide Robocopy options"
+            ),
+        )
+        self.copy_toggle.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        copy_settings.grid(row=3, column=0, sticky="ew")
+        copy_settings.grid_remove()
         for column, (key, label) in enumerate(
             (
                 ("robocopy_threads", "Robocopy threads"),
@@ -93,8 +150,11 @@ class DzSaveWindow:
             )
 
         selection = ttk.LabelFrame(
-            main, text="Found TIFF files (selected files will be converted)", padding=8
+            main,
+            text="Found TIFF files (selected files will be converted)",
+            padding=8,
         )
+        self.selection_frame = selection
         selection.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         selection.columnconfigure(0, weight=1)
         selection.rowconfigure(1, weight=1)
@@ -122,18 +182,154 @@ class DzSaveWindow:
         file_scrollbar.grid(row=0, column=1, sticky="ns")
         self.file_list.bind("<<ListboxSelect>>", self._update_selection_count)
 
-        activity = ttk.LabelFrame(main, text="Activity", padding=10)
-        activity.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
-        main.rowconfigure(6, weight=1)
+        self.activity_toggle = ttk.Button(
+            main,
+            text="Hide Activity",
+            command=lambda: self._toggle_grid_widget(
+                activity, self.activity_toggle, "Show Activity", "Hide Activity"
+            ),
+        )
+        self.activity_toggle.grid(row=6, column=0, sticky="w", pady=(10, 0))
+        activity = ttk.LabelFrame(main, padding=10)
+        activity.grid(row=7, column=0, sticky="ew")
         activity.columnconfigure(0, weight=1)
-        activity.rowconfigure(1, weight=1)
+        activity.rowconfigure(8, weight=1)
         self.status = tk.StringVar(value="Ready. Scan for TIFF files or start conversion.")
         ttk.Label(activity, textvariable=self.status).grid(
             row=0, column=0, sticky="w", pady=(0, 6)
         )
 
+        self.log_visible = False
+        self.open_report_path = None
+        self.log_toggle = ttk.Button(
+            activity,
+            text="Show detailed text output",
+            command=self._toggle_log,
+        )
+        self.log_toggle.grid(row=1, column=0, sticky="w", pady=(0, 5))
+        report_frame = ttk.Frame(activity)
+        report_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+        self.report_info = tk.StringVar(value="Reports will be saved in the first destination.")
+        ttk.Label(report_frame, textvariable=self.report_info).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.open_report_button = ttk.Button(
+            report_frame, text="Open report", command=self._open_report, state=tk.DISABLED
+        )
+        self.open_report_button.pack(side=tk.RIGHT)
+
+        metrics_frame = ttk.LabelFrame(activity, padding=6)
+        self.metrics_frame = metrics_frame
+        self.details_toggle = ttk.Button(
+            activity,
+            text="Show live conversion details",
+            command=lambda: self._toggle_grid_widget(
+                metrics_frame, self.details_toggle,
+                "Show live conversion details",
+                "Hide live conversion details",
+            ),
+        )
+        self.details_toggle.grid(row=3, column=0, sticky="w")
+        metrics_frame.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        metrics_frame.grid_remove()
+        metrics_frame.columnconfigure(1, weight=1)
+        metrics_frame.columnconfigure(3, weight=1)
+        self.activity_values = {}
+        detail_fields = (
+            ("file", "Current file"),
+            ("resolution", "Source resolution"),
+            ("load", "Source load"),
+            ("deepzoom", "DeepZoom"),
+            ("thumbnail", "Thumbnail"),
+            ("copy", "Copy"),
+            ("slide", "Slide total"),
+            ("elapsed", "Run elapsed"),
+            ("counts", "File totals"),
+            ("outputs", "Output paths"),
+        )
+        for index, (key, label) in enumerate(detail_fields):
+            row, pair = divmod(index, 2)
+            column = pair * 2
+            ttk.Label(metrics_frame, text=label).grid(
+                row=row, column=column, sticky="nw", padx=(0, 5), pady=2
+            )
+            value = tk.StringVar(value="—")
+            ttk.Label(metrics_frame, textvariable=value, wraplength=320).grid(
+                row=row, column=column + 1, sticky="nw", padx=(0, 12), pady=2
+            )
+            self.activity_values[key] = value
+        self.run_summary = tk.StringVar(
+            value="Started: — | Finished: — | Average per file: —"
+        )
+        ttk.Label(activity, textvariable=self.run_summary, wraplength=920).grid(
+            row=5, column=0, sticky="ew", pady=(0, 6)
+        )
+
+        results_frame = ttk.LabelFrame(activity, padding=4)
+        self.results_frame = results_frame
+        self.results_toggle = ttk.Button(
+            activity,
+            text="Show per-file results",
+            command=lambda: self._toggle_grid_widget(
+                results_frame, self.results_toggle,
+                "Show per-file results", "Hide per-file results"
+            ),
+        )
+        self.results_toggle.grid(row=6, column=0, sticky="w")
+        results_frame.grid(row=7, column=0, sticky="ew", pady=(0, 6))
+        results_frame.grid_remove()
+        results_frame.columnconfigure(0, weight=1)
+        columns = (
+            "file",
+            "resolution",
+            "load",
+            "deepzoom",
+            "thumbnail",
+            "copy",
+            "total",
+            "status",
+            "copy_destinations",
+            "outputs",
+            "error",
+        )
+        self.results_table = ttk.Treeview(
+            results_frame, columns=columns, show="headings", height=5
+        )
+        headings = (
+            "File",
+            "Resolution",
+            "Load",
+            "DeepZoom",
+            "Thumbnail",
+            "Copy",
+            "Total",
+            "Status",
+            "Copy destinations",
+            "Output paths",
+            "Error",
+        )
+        for column, heading in zip(columns, headings):
+            self.results_table.heading(column, text=heading)
+            self.results_table.column(column, width=100, stretch=True)
+        self.results_table.column("file", width=210)
+        self.results_table.column("copy_destinations", width=220)
+        self.results_table.column("outputs", width=260)
+        self.results_table.column("error", width=180)
+        results_scrollbar = ttk.Scrollbar(
+            results_frame, orient=tk.HORIZONTAL, command=self.results_table.xview
+        )
+        results_vertical_scrollbar = ttk.Scrollbar(
+            results_frame, orient=tk.VERTICAL, command=self.results_table.yview
+        )
+        self.results_table.configure(
+            xscrollcommand=results_scrollbar.set,
+            yscrollcommand=results_vertical_scrollbar.set,
+        )
+        self.results_table.grid(row=0, column=0, sticky="ew")
+        results_vertical_scrollbar.grid(row=0, column=1, sticky="ns")
+        results_scrollbar.grid(row=1, column=0, sticky="ew")
+
         log_frame = ttk.Frame(activity)
-        log_frame.grid(row=1, column=0, sticky="nsew")
+        self.log_frame = log_frame
+        log_frame.grid(row=8, column=0, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(log_frame, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9))
@@ -141,25 +337,35 @@ class DzSaveWindow:
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
+        log_frame.grid_remove()
 
         progress_frame = ttk.LabelFrame(main, text="Conversion progress", padding=8)
-        progress_frame.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        self.progress_frame = progress_frame
+        progress_frame.grid(row=8, column=0, sticky="ew", pady=(10, 0))
         progress_frame.columnconfigure(0, weight=1)
         self.progress_status = tk.StringVar(value="Ready")
         ttk.Label(progress_frame, textvariable=self.progress_status).grid(
-            row=0, column=0, sticky="w"
+            row=0, column=0, columnspan=2, sticky="w"
         )
         self.progress = ttk.Progressbar(progress_frame, mode="determinate")
         self.progress.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        self.overall_percentage = tk.StringVar(value="0%")
+        ttk.Label(progress_frame, textvariable=self.overall_percentage, width=5).grid(
+            row=1, column=1, sticky="e", padx=(8, 0)
+        )
         ttk.Label(progress_frame, text="Current slide").grid(
-            row=2, column=0, sticky="w"
+            row=2, column=0, columnspan=2, sticky="w"
         )
         self.stage_progress = ttk.Progressbar(
             progress_frame, mode="determinate", maximum=4
         )
         self.stage_progress.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        self.stage_percentage = tk.StringVar(value="0%")
+        ttk.Label(progress_frame, textvariable=self.stage_percentage, width=5).grid(
+            row=3, column=1, sticky="e", padx=(8, 0)
+        )
         buttons = ttk.Frame(main)
-        buttons.grid(row=8, column=0, sticky="e", pady=(10, 0))
+        buttons.grid(row=9, column=0, sticky="e", pady=(10, 0))
         self.scan_button = ttk.Button(buttons, text="Scan files", command=self.scan)
         self.scan_button.pack(side=tk.LEFT, padx=(0, 8))
         self.start_button = ttk.Button(
@@ -180,6 +386,15 @@ class DzSaveWindow:
             command=lambda: self._browse(key),
         ).grid(row=row, column=2, padx=(8, 0), pady=4)
 
+    @staticmethod
+    def _toggle_grid_widget(widget, toggle, show_text, hide_text):
+        if widget.winfo_manager():
+            widget.grid_remove()
+            toggle.configure(text=show_text)
+        else:
+            widget.grid()
+            toggle.configure(text=hide_text)
+
     def _render_destinations(self):
         for child in self.destinations_frame.winfo_children():
             child.destroy()
@@ -199,7 +414,11 @@ class DzSaveWindow:
                 self.destinations_frame,
                 text="Remove",
                 command=lambda item=value: self._remove_destination(item),
-                state=tk.NORMAL if len(self.destinations) > 1 else tk.DISABLED,
+                state=(
+                    tk.NORMAL
+                    if index > 0 and len(self.destinations) > 1
+                    else tk.DISABLED
+                ),
             ).grid(row=index, column=3, padx=(6, 0), pady=3)
 
     def _browse_destination(self, value):
@@ -212,7 +431,7 @@ class DzSaveWindow:
         self._render_destinations()
 
     def _remove_destination(self, value):
-        if len(self.destinations) > 1:
+        if len(self.destinations) > 1 and value is not self.destinations[0]:
             self.destinations.remove(value)
             self._render_destinations()
 
@@ -237,6 +456,7 @@ class DzSaveWindow:
     def scan(self):
         if self.busy:
             return
+        self._scroll_to_widget(self.selection_frame)
         folder = self.values["input_dir"].get()
         self.file_list.configure(state=tk.NORMAL)
         self.file_list.delete(0, tk.END)
@@ -267,11 +487,27 @@ class DzSaveWindow:
             messagebox.showerror("Check settings", str(error))
             return
 
+        self._scroll_to_widget(self.progress_frame)
         self._set_busy(True)
         self.progress.configure(maximum=1, value=0)
         self.stage_progress.configure(value=0)
+        self.overall_percentage.set("0%")
+        self.stage_percentage.set("0%")
         self.progress_status.set("Starting conversion")
         self.status.set("Conversion running...")
+        self.report_info.set("Creating conversion log and Markdown report...")
+        self.open_report_button.configure(state=tk.DISABLED)
+        self.open_report_path = None
+        self.run_started_monotonic = None
+        self.run_started_at = "—"
+        self.run_summary.set("Started: — | Finished: — | Average per file: —")
+        for value in self.activity_values.values():
+            value.set("—")
+        for item in self.results_table.get_children():
+            self.results_table.delete(item)
+        self.log.configure(state=tk.NORMAL)
+        self.log.delete("1.0", tk.END)
+        self.log.configure(state=tk.DISABLED)
         self._append_log("Starting conversion...\n")
         common.run_conversion(settings, self.events)
 
@@ -284,6 +520,15 @@ class DzSaveWindow:
 
             if event == "log":
                 self._append_log(payload)
+            elif event == "run_started":
+                self.run_started_monotonic = time.perf_counter()
+                self.run_started_at = payload.get("started_at", "—")
+                self.run_summary.set(
+                    f"Started: {self.run_started_at} | Finished: In progress"
+                )
+                self.report_info.set(
+                    f"Log: {payload['log_path']} | Report: {payload['report_path']}"
+                )
             elif event == "progress":
                 total = max(1, payload["files_total"])
                 overall = (
@@ -291,11 +536,45 @@ class DzSaveWindow:
                 )
                 self.progress.configure(maximum=total, value=min(total, overall))
                 self.stage_progress.configure(value=payload["stage_value"])
+                self.overall_percentage.set(
+                    f"{round(min(total, overall) / total * 100)}%"
+                )
+                self.stage_percentage.set(
+                    f"{round(payload['stage_value'] / 4 * 100)}%"
+                )
                 self.progress_status.set(
                     f"{payload['message']} — "
                     f"{payload['completed_files']} of {payload['files_total']} files complete"
                 )
                 self.status.set(payload["message"])
+                self._update_activity(payload)
+            elif event == "run_report":
+                summary = payload["summary"]
+                self.report_info.set(
+                    f"Report: {payload['report_path']} | Text log: {payload['log_path']}"
+                )
+                self.open_report_path = payload["report_path"]
+                self.open_report_button.configure(state=tk.NORMAL)
+                self.activity_values["elapsed"].set(
+                    common.format_duration(summary.get("duration_seconds"))
+                )
+                self.activity_values["counts"].set(
+                    f"{summary.get('completed', 0)} completed / "
+                    f"{summary.get('failed', 0)} failed / "
+                    f"{summary.get('total', 0)} total"
+                )
+                self.run_summary.set(
+                    f"Started: {self.run_started_at} | "
+                    f"Finished: {payload.get('finished_at', '—')} | "
+                    f"Total: {common.format_duration(summary.get('duration_seconds'))} | "
+                    f"Average per completed file: "
+                    f"{common.format_duration(summary.get('average_seconds'))}"
+                )
+                self._populate_results(summary.get("results", []))
+                self.status.set(
+                    f"Finished: {summary.get('completed', 0)} completed, "
+                    f"{summary.get('failed', 0)} failed."
+                )
             elif event == "scan_done":
                 self._set_busy(False)
                 if payload is not None:
@@ -312,9 +591,140 @@ class DzSaveWindow:
             elif event == "done":
                 self._set_busy(False)
                 self.stage_progress.configure(value=4)
-                self.status.set("Conversion finished. See the activity log for details.")
+                self.overall_percentage.set("100%")
+                self.stage_percentage.set("100%")
+                if not getattr(self, "open_report_path", None):
+                    self.status.set("Conversion ended. Review any error messages.")
 
+        if self.run_started_monotonic is not None and self.busy:
+            self.activity_values["elapsed"].set(
+                common.format_duration(time.perf_counter() - self.run_started_monotonic)
+            )
         self.root.after(100, self._poll_events)
+
+    def _update_activity(self, payload):
+        metrics = payload.get("metrics", {})
+        self.activity_values["file"].set(
+            payload.get("file") or "—"
+        )
+        self.activity_values["resolution"].set(metrics.get("resolution") or "—")
+        self.activity_values["load"].set(
+            common.format_duration(metrics.get("load_seconds"))
+        )
+        self.activity_values["deepzoom"].set(
+            f"{metrics.get('deepzoom_status', 'Pending')} "
+            f"({common.format_duration(metrics.get('deepzoom_seconds'))})"
+        )
+        self.activity_values["thumbnail"].set(
+            f"{metrics.get('thumbnail_status', 'Pending')} "
+            f"({common.format_duration(metrics.get('thumbnail_seconds'))})"
+        )
+        copies = metrics.get("copy_destinations", [])
+        copy_summary = "; ".join(
+            f"{item['status']} {item['destination']} "
+            f"({common.format_duration(item.get('duration_seconds'))})"
+            for item in copies
+        )
+        self.activity_values["copy"].set(
+            copy_summary
+            or f"Total {common.format_duration(metrics.get('copy_seconds'))}"
+        )
+        self.activity_values["slide"].set(
+            common.format_duration(metrics.get("slide_seconds"))
+        )
+        if payload.get("run_elapsed_seconds") is not None:
+            self.activity_values["elapsed"].set(
+                common.format_duration(payload["run_elapsed_seconds"])
+            )
+        self.activity_values["counts"].set(
+            f"{payload.get('completed_files', 0)} completed / "
+            f"{payload.get('files_total', 0)} total"
+        )
+        self.activity_values["outputs"].set(
+            "\n".join(
+                path
+                for path in (
+                    metrics.get("deepzoom_output"),
+                    metrics.get("thumbnail_output"),
+                    *metrics.get("copy_outputs", []),
+                )
+                if path
+            )
+            or "—"
+        )
+
+    def _populate_results(self, results):
+        for item in results:
+            self.results_table.insert(
+                "",
+                tk.END,
+                values=(
+                    item.get("file", ""),
+                    item.get("resolution") or "—",
+                    common.format_duration(item.get("load_seconds")),
+                    f"{item.get('deepzoom_status', '—')} "
+                    f"({common.format_duration(item.get('deepzoom_seconds'))})",
+                    f"{item.get('thumbnail_status', '—')} "
+                    f"({common.format_duration(item.get('thumbnail_seconds'))})",
+                    common.format_duration(item.get("copy_seconds")),
+                    common.format_duration(item.get("slide_seconds")),
+                    item.get("status", ""),
+                    "; ".join(
+                        f"{copy.get('destination')}: {copy.get('status')} "
+                        f"({common.format_duration(copy.get('duration_seconds'))})"
+                        for copy in item.get("copy_destinations", [])
+                    ),
+                    "; ".join(
+                        path
+                        for path in (
+                            item.get("deepzoom_output"),
+                            item.get("thumbnail_output"),
+                            *item.get("copy_outputs", []),
+                        )
+                        if path
+                    ),
+                    item.get("error", ""),
+                ),
+            )
+
+    def _toggle_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log_frame.grid()
+            self.log_frame.master.rowconfigure(8, weight=1)
+            self.log_toggle.configure(text="Hide detailed text output")
+        else:
+            self.log_frame.grid_remove()
+            self.log_frame.master.rowconfigure(8, weight=0)
+            self.log_toggle.configure(text="Show detailed text output")
+
+    def _toggle_options(self):
+        self.options_visible = not self.options_visible
+        if self.options_visible:
+            self.options_frame.grid()
+            self.options_toggle.configure(text="Hide DeepZoom and Robocopy options")
+        else:
+            self.options_frame.grid_remove()
+            self.options_toggle.configure(text="Show DeepZoom and Robocopy options")
+        self.root.after_idle(
+            lambda: self.page_canvas.configure(
+                scrollregion=self.page_canvas.bbox("all")
+            )
+        )
+
+    def _scroll_page(self, event):
+        if event.delta:
+            self.page_canvas.yview_scroll(-int(event.delta / 120), "units")
+
+    def _scroll_to_widget(self, widget):
+        content_height = max(1, self.page_content.winfo_height())
+        self.page_canvas.yview_moveto(widget.winfo_y() / content_height)
+
+    def _open_report(self):
+        try:
+            common.open_report(self.open_report_path)
+        except (OSError, RuntimeError) as error:
+            messagebox.showerror("Could not open report", str(error))
 
     def _selected_files(self):
         return [self.scanned_files[index] for index in self.file_list.curselection()]

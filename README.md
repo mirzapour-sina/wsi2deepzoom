@@ -27,8 +27,11 @@ In the GUI:
 
 1. Set the source WSI folder and the initial output destination.
 2. Use **Add destination** to copy output to additional folders, or **Remove**
-   to remove an extra destination. At least one destination is required.
-3. Set JPEG, thumbnail, and Robocopy options as needed.
+   to remove an extra destination. The first destination is always primary and
+   cannot be removed; at least one destination is required.
+3. Expand **Show DeepZoom and Robocopy options** to set DeepZoom JPEG quality,
+   thumbnail size and quality, and Robocopy threads, retry count, and retry
+   wait. These advanced options are collapsed by default.
 4. Click **Scan files**. The TIFF list is populated with all files checked.
 5. Check or uncheck individual files, or use **Select all / Select none**.
 6. Click **Start conversion**. Only checked files from the most recent scan
@@ -42,8 +45,37 @@ all discovered TIFFs. Scanning and conversion run in the background while the
 GUI remains responsive.
 
 During conversion, graphical progress bars show overall slide progress and
-the current slide's DeepZoom, thumbnail, and copy stages. The activity log is
-available for diagnostic details, not as the progress indicator.
+the current slide's DeepZoom, thumbnail, and copy stages, with percentage
+values displayed for both bars. Each GUI presents setup, file selection,
+activity details, per-file results, and progress as normal vertically stacked
+sections, without tabs or overlapping controls. The page scrolls vertically
+when all sections do not fit in the window; result tables keep their own
+horizontal and vertical scrollbars within the results section. Detailed text
+output is hidden by default; use **Show detailed text output** to expand its
+section when you need to inspect converter diagnostics.
+Activity, live conversion details, per-file results, and the individual
+DeepZoom and Robocopy option groups can be expanded or collapsed. Folder paths
+and the found-TIFF selection area remain in the scrollable page; conversion
+progress and the **Scan files / Start conversion** buttons stay pinned at the
+bottom and remain visible while the page scrolls or sections expand.
+The live conversion details show the current input and output paths, source
+resolution, load/DeepZoom/thumbnail/copy timings, current-slide elapsed time,
+and the total run timer. A per-file results table retains each slide's
+resolution, operation statuses and durations, copy destinations, output paths,
+and any error after the run completes.
+
+Each GUI conversion saves artifacts in a `dzsave_reports` folder under the
+first destination:
+
+- A timestamped `.log` file containing the converter's full text output and
+  any run errors.
+- A timestamped `.md` report with conversion settings, destinations, elapsed
+  time, and per-file completion or failure details.
+
+The GUI displays both paths when the run begins and provides **Open report**
+after the Markdown report has been written. These files are only created by
+GUI-driven conversions; running `dzsave-v4.py` directly retains its normal
+console output behavior.
 
 The command-line converter can still be started independently:
 

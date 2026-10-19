@@ -4,7 +4,9 @@ import os
 import queue
 import sys
 import threading
-from contextlib import redirect_stdout
+import webbrowser
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 
 
 def _get_app_dir():
@@ -122,11 +124,13 @@ def validate_settings(values, selected_files=None, destinations=None):
 
 
 class QueueWriter:
-    def __init__(self, events):
+    def __init__(self, events, log_file):
         self.events = events
+        self.log_file = log_file
         self.buffer = ""
 
     def write(self, text):
+        self.log_file.write(text)
         self.buffer += text
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
@@ -137,6 +141,7 @@ class QueueWriter:
         if self.buffer:
             self._send_line(self.buffer)
             self.buffer = ""
+        self.log_file.flush()
 
     def _send_line(self, line):
         if line.startswith("Overall progress:"):
@@ -146,39 +151,189 @@ class QueueWriter:
 
 def run_conversion(settings, events):
     def worker():
+        log_path = None
+        report_path = None
+        summary = None
+        conversion_error = None
         try:
-            vips_dir = APP_DIR / "vips"
-            if vips_dir.is_dir():
-                os.environ["PATH"] = str(vips_dir) + os.pathsep + os.environ.get("PATH", "")
-                if os.name == "nt" and hasattr(os, "add_dll_directory"):
-                    _VIPS_DLL_HANDLES.append(os.add_dll_directory(str(vips_dir)))
-
-            spec = importlib.util.spec_from_file_location(
-                "dzsave_v4_converter", CONVERTER_PATH
-            )
-            if spec is None or spec.loader is None:
-                raise RuntimeError(f"Could not load converter: {CONVERTER_PATH}")
-            converter = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(converter)
-
-            converter.INPUT_DIR = settings["input_dir"]
-            converter.DESTINATION_DIRS = settings["destinations"]
-            converter.JPEG_QUALITY = settings["jpeg_quality"]
-            converter.THUMBNAIL_SIZE = settings["thumbnail_size"]
-            converter.THUMBNAIL_QUALITY = settings["thumbnail_quality"]
-            converter.ROBOCOPY_THREADS = settings["robocopy_threads"]
-            converter.ROBOCOPY_RETRIES = settings["robocopy_retries"]
-            converter.ROBOCOPY_WAIT = settings["robocopy_wait"]
-            converter.SELECTED_FILES = settings.get("selected_files")
-            converter.PROGRESS_CALLBACK = lambda progress: events.put(
-                ("progress", progress)
+            report_dir = settings["destinations"][0] / "dzsave_reports"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            log_path = report_dir / f"conversion_{run_stamp}.log"
+            report_path = report_dir / f"conversion_{run_stamp}.md"
+            started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            events.put(
+                (
+                    "run_started",
+                    {
+                        "log_path": str(log_path),
+                        "report_path": str(report_path),
+                        "started_at": started_at,
+                    },
+                )
             )
 
-            with redirect_stdout(QueueWriter(events)):
-                converter.main()
+            with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
+                with redirect_stdout(QueueWriter(events, log_file)), redirect_stderr(
+                    QueueWriter(events, log_file)
+                ):
+                    vips_dir = APP_DIR / "vips"
+                    if vips_dir.is_dir():
+                        os.environ["PATH"] = (
+                            str(vips_dir) + os.pathsep + os.environ.get("PATH", "")
+                        )
+                        if os.name == "nt" and hasattr(os, "add_dll_directory"):
+                            _VIPS_DLL_HANDLES.append(
+                                os.add_dll_directory(str(vips_dir))
+                            )
+
+                    spec = importlib.util.spec_from_file_location(
+                        "dzsave_v4_converter", CONVERTER_PATH
+                    )
+                    if spec is None or spec.loader is None:
+                        raise RuntimeError(f"Could not load converter: {CONVERTER_PATH}")
+                    converter = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(converter)
+
+                    converter.INPUT_DIR = settings["input_dir"]
+                    converter.DESTINATION_DIRS = settings["destinations"]
+                    converter.JPEG_QUALITY = settings["jpeg_quality"]
+                    converter.THUMBNAIL_SIZE = settings["thumbnail_size"]
+                    converter.THUMBNAIL_QUALITY = settings["thumbnail_quality"]
+                    converter.ROBOCOPY_THREADS = settings["robocopy_threads"]
+                    converter.ROBOCOPY_RETRIES = settings["robocopy_retries"]
+                    converter.ROBOCOPY_WAIT = settings["robocopy_wait"]
+                    converter.SELECTED_FILES = settings.get("selected_files")
+                    converter.PROGRESS_CALLBACK = lambda progress: events.put(
+                        ("progress", progress)
+                    )
+                    summary = converter.main()
         except Exception as error:
+            conversion_error = str(error)
+            if log_path is not None and log_path.is_file():
+                try:
+                    with log_path.open("a", encoding="utf-8") as log_file:
+                        log_file.write(f"\nRun error: {error}\n")
+                except OSError as log_error:
+                    events.put(("error", f"Could not append error to text log: {log_error}"))
             events.put(("error", str(error)))
         finally:
+            if report_path is not None and log_path is not None:
+                try:
+                    _write_markdown_report(
+                        report_path,
+                        log_path,
+                        settings,
+                        summary,
+                        conversion_error,
+                    )
+                    events.put(
+                        (
+                            "run_report",
+                            {
+                                "log_path": str(log_path),
+                                "report_path": str(report_path),
+                                "summary": summary or {},
+                                "error": conversion_error or "",
+                                "finished_at": datetime.now()
+                                .astimezone()
+                                .isoformat(timespec="seconds"),
+                            },
+                        )
+                    )
+                except OSError as error:
+                    events.put(("error", f"Could not save Markdown report: {error}"))
             events.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+def _markdown_cell(value):
+    return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", " ")
+
+
+def format_duration(seconds):
+    return f"{seconds:.2f} s" if seconds is not None else "—"
+
+
+def _write_markdown_report(path, log_path, settings, summary, conversion_error):
+    summary = summary or {}
+    result_rows = [
+        "| File | Resolution | Status | Load (s) | DeepZoom (s) | Thumbnail (s) | Copy (s) | Total (s) | Copy destinations | Output paths | Error |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+    ]
+    for item in summary.get("results", []):
+        duration = item.get("duration_seconds")
+        result_rows.append(
+            "| "
+            + " | ".join(
+                (
+                    _markdown_cell(item.get("file", "")),
+                    _markdown_cell(item.get("resolution", "")),
+                    _markdown_cell(item.get("status", "unknown")),
+                    _markdown_cell(item.get("load_seconds")),
+                    _markdown_cell(item.get("deepzoom_seconds")),
+                    _markdown_cell(item.get("thumbnail_seconds")),
+                    _markdown_cell(item.get("copy_seconds")),
+                    _markdown_cell(f"{duration:.2f}" if duration is not None else ""),
+                    _markdown_cell(
+                        "; ".join(
+                            f"{copy.get('destination')}: {copy.get('status')} "
+                            f"({copy.get('duration_seconds', 0):.2f}s)"
+                            for copy in item.get("copy_destinations", [])
+                        )
+                    ),
+                    _markdown_cell(
+                        "; ".join(
+                            path
+                            for path in (
+                                item.get("deepzoom_output", ""),
+                                item.get("thumbnail_output", ""),
+                                *item.get("copy_outputs", []),
+                            )
+                            if path
+                        )
+                    ),
+                    _markdown_cell(item.get("error", "")),
+                )
+            )
+            + " |"
+        )
+    if len(result_rows) == 2:
+        result_rows.append("| No files processed | - | - | - | - | - | - | - | - | - | - |")
+
+    duration = summary.get("duration_seconds")
+    average = summary.get("average_seconds")
+    lines = [
+        "# WSI to DeepZoom Conversion Report",
+        "",
+        f"- **Started:** {summary.get('started_at', 'unavailable')}",
+        f"- **Finished:** {datetime.now().astimezone().isoformat(timespec='seconds')}",
+        f"- **Input folder:** `{settings['input_dir']}`",
+        f"- **Selected files:** {summary.get('total', 0)}",
+        f"- **Completed:** {summary.get('completed', 0)}",
+        f"- **Failed:** {summary.get('failed', 0)}",
+        f"- **Total duration:** {duration:.2f} seconds" if duration is not None else "- **Total duration:** unavailable",
+        f"- **Average per completed file:** {average:.2f} seconds" if average is not None else "- **Average per completed file:** unavailable",
+        f"- **JPEG quality:** {settings['jpeg_quality']}",
+        f"- **Thumbnail size:** {settings['thumbnail_size']} px",
+        f"- **Thumbnail quality:** {settings['thumbnail_quality']}",
+        f"- **Robocopy:** {settings['robocopy_threads']} threads, {settings['robocopy_retries']} retries, {settings['robocopy_wait']} second wait",
+        "",
+        "## Destinations",
+        "",
+    ]
+    lines.extend(f"- `{destination}`" for destination in settings["destinations"])
+    lines.extend(["", "## Per-file results", "", *result_rows])
+    if conversion_error:
+        lines.extend(["", "## Run error", "", conversion_error])
+    lines.extend(["", "## Detailed text log", "", f"`{log_path}`", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def open_report(path):
+    report_path = Path(path)
+    if not report_path.is_file():
+        raise FileNotFoundError(f"Report file was not found: {report_path}")
+    if not webbrowser.open(report_path.resolve().as_uri()):
+        raise RuntimeError(f"Could not open report: {report_path}")

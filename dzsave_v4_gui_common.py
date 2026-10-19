@@ -37,6 +37,8 @@ CONVERTER_PATH = APP_DIR / "dzsave-v4.py"
 _VIPS_DLL_HANDLES = []
 DEFAULTS = {
     "input_dir": r"D:\Edupat\Urmia-Medical-University\WSI",
+    "wsi_extensions": ".tif, .tiff, .svs, .ndpi, .mrxs, .scn, .vms, .vmu, .bif, .svslide, .vsi, .isyntax, .qptiff, .ome.tif, .ome.tiff",
+    "deepzoom_format": "dzi",
     "jpeg_quality": "85",
     "thumbnail_size": "600",
     "thumbnail_quality": "85",
@@ -45,15 +47,51 @@ DEFAULTS = {
     "robocopy_wait": "1",
 }
 DEFAULT_DESTINATIONS = [r"D:\Edupat\Deepzoom"]
+DEEPZOOM_FORMATS = {
+    "dzi": {"label": "DZI (descriptor + tile folder)", "layout": "dz"},
+    "szi": {"label": "SZI archive", "layout": "dz"},
+    "zip": {"label": "ZIP archive", "layout": "dz"},
+    "zoomify": {"label": "Zoomify", "layout": "zoomify"},
+    "google": {"label": "Google Maps", "layout": "google"},
+    "iiif": {"label": "IIIF v2", "layout": "iiif"},
+    "iiif3": {"label": "IIIF v3", "layout": "iiif3"},
+}
 
-def find_wsi_files(input_dir):
+
+def parse_wsi_extensions(value):
+    extensions = []
+    for raw_extension in str(value).replace(";", ",").split(","):
+        extension = raw_extension.strip().lower().removeprefix("*")
+        if not extension:
+            continue
+        if not extension.startswith("."):
+            extension = "." + extension
+        if len(extension) < 2 or any(
+            character in extension for character in ("/", "\\", ":", " ")
+        ):
+            raise ValueError(f"Invalid WSI file extension: {raw_extension.strip()}")
+        if extension not in extensions:
+            extensions.append(extension)
+    if not extensions:
+        raise ValueError("Enter at least one WSI file extension.")
+    return tuple(extensions)
+
+
+def find_wsi_files(input_dir, extensions=None):
     input_dir = Path(input_dir).expanduser()
     if not input_dir.is_dir():
         raise ValueError(f"Input folder does not exist: {input_dir}")
+    if extensions is None:
+        extensions = parse_wsi_extensions(DEFAULTS["wsi_extensions"])
+    elif isinstance(extensions, str):
+        extensions = parse_wsi_extensions(extensions)
     return sorted(
         path
         for path in input_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+        if path.is_file()
+        and path.name.lower().endswith(
+            tuple(extension.lower() for extension in extensions)
+        )
     )
 
 
@@ -79,8 +117,19 @@ def validate_settings(values, selected_files=None, destinations=None):
     if not output_dirs:
         raise ValueError("Add at least one destination folder.")
 
+    deepzoom_format = str(values.get("deepzoom_format", "dzi")).strip().lower()
+    if deepzoom_format not in DEEPZOOM_FORMATS:
+        raise ValueError(
+            "Select a supported DeepZoom format: "
+            + ", ".join(DEEPZOOM_FORMATS)
+            + "."
+        )
+    wsi_extensions = parse_wsi_extensions(values.get("wsi_extensions", ""))
+
     try:
         settings = {
+            "deepzoom_format": deepzoom_format,
+            "wsi_extensions": wsi_extensions,
             "jpeg_quality": int(values["jpeg_quality"]),
             "thumbnail_size": int(values["thumbnail_size"]),
             "thumbnail_quality": int(values["thumbnail_quality"]),
@@ -89,7 +138,7 @@ def validate_settings(values, selected_files=None, destinations=None):
             "robocopy_wait": int(values["robocopy_wait"]),
         }
     except (TypeError, ValueError) as error:
-        raise ValueError("All conversion settings must be whole numbers.") from error
+        raise ValueError("All numeric conversion settings must be whole numbers.") from error
 
     if not 1 <= settings["jpeg_quality"] <= 100:
         raise ValueError("JPEG quality must be between 1 and 100.")
@@ -114,11 +163,16 @@ def validate_settings(values, selected_files=None, destinations=None):
                 raise ValueError(
                     f"Selected file is outside the source folder: {path}"
                 ) from error
-            if not path.is_file() or path.suffix.lower() not in {".tif", ".tiff"}:
-                raise ValueError(f"Selected TIFF file is no longer available: {path}")
+            if not path.is_file() or not path.name.lower().endswith(
+                settings["wsi_extensions"]
+            ):
+                raise ValueError(
+                    "Selected WSI file is no longer available or its extension "
+                    f"is not enabled: {path}"
+                )
             normalized_files.append(path)
         if not normalized_files:
-            raise ValueError("Select at least one TIFF file to convert.")
+            raise ValueError("Select at least one WSI file to convert.")
         settings["selected_files"] = normalized_files
     return settings
 
@@ -204,6 +258,8 @@ def run_conversion(settings, events):
                     converter.ROBOCOPY_RETRIES = settings["robocopy_retries"]
                     converter.ROBOCOPY_WAIT = settings["robocopy_wait"]
                     converter.SELECTED_FILES = settings.get("selected_files")
+                    converter.WSI_EXTENSIONS = settings["wsi_extensions"]
+                    converter.DEEPZOOM_FORMAT = settings["deepzoom_format"]
                     converter.PROGRESS_CALLBACK = lambda progress: events.put(
                         ("progress", progress)
                     )
@@ -310,6 +366,8 @@ def _write_markdown_report(path, log_path, settings, summary, conversion_error):
         f"- **Started:** {summary.get('started_at', 'unavailable')}",
         f"- **Finished:** {datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"- **Input folder:** `{settings['input_dir']}`",
+        f"- **Input extensions:** {', '.join(settings['wsi_extensions'])}",
+        f"- **DeepZoom output format:** {DEEPZOOM_FORMATS[settings['deepzoom_format']]['label']}",
         f"- **Selected files:** {summary.get('total', 0)}",
         f"- **Completed:** {summary.get('completed', 0)}",
         f"- **Failed:** {summary.get('failed', 0)}",

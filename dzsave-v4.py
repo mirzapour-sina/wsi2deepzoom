@@ -71,6 +71,24 @@ ROBOCOPY_THREADS = 16
 ROBOCOPY_RETRIES = 2
 
 ROBOCOPY_WAIT = 1
+WSI_EXTENSIONS = (
+    ".tif",
+    ".tiff",
+    ".svs",
+    ".ndpi",
+    ".mrxs",
+    ".scn",
+    ".vms",
+    ".vmu",
+    ".bif",
+    ".svslide",
+    ".vsi",
+    ".isyntax",
+    ".qptiff",
+    ".ome.tif",
+    ".ome.tiff",
+)
+DEEPZOOM_FORMAT = "dzi"
 SELECTED_FILES = None
 DESTINATION_DIRS = None
 PROGRESS_CALLBACK = None
@@ -147,28 +165,35 @@ def format_time(seconds):
 # CHECK DEEPZOOM
 # =========================================================
 
-def deepzoom_exists(output_path: Path):
-    """
-    Check whether a DeepZoom output exists.
+def deepzoom_storage_path(output_path: Path, output_format=None):
+    output_format = output_format or DEEPZOOM_FORMAT
+    if output_format in {"dzi", "szi", "zip"}:
+        return Path(f"{output_path}.{output_format}")
+    return output_path
 
-    Expected:
 
-        slide.dzi
-        slide_files/
-    """
+def deepzoom_save_path(output_path: Path, output_format=None):
+    output_format = output_format or DEEPZOOM_FORMAT
+    if output_format == "dzi":
+        return output_path
+    return deepzoom_storage_path(output_path, output_format)
 
-    dzi_file = output_path.with_suffix(
-        ".dzi"
-    )
 
-    tiles_folder = Path(
-        str(output_path) + "_files"
-    )
-
+def deepzoom_exists(output_path: Path, output_format=None):
+    output_format = output_format or DEEPZOOM_FORMAT
+    storage_path = deepzoom_storage_path(output_path, output_format)
+    if output_format == "dzi":
+        tiles_folder = Path(str(output_path) + "_files")
+        return (
+            storage_path.is_file()
+            and tiles_folder.exists()
+            and tiles_folder.is_dir()
+        )
+    if output_format in {"szi", "zip"}:
+        return storage_path.is_file()
     return (
-        dzi_file.exists()
-        and tiles_folder.exists()
-        and tiles_folder.is_dir()
+        storage_path.is_dir()
+        and any(storage_path.iterdir())
     )
 
 
@@ -239,176 +264,62 @@ def create_thumbnail(
 def copy_deepzoom(
     source_path: Path,
     destination_path: Path,
+    output_format=None,
 ):
-    """
-    Copy a DeepZoom using Windows robocopy.
-
-    Copies:
-
-        slide.dzi
-        slide_files/
-        thumbnail.jpg
-    """
-
+    output_format = output_format or DEEPZOOM_FORMAT
     copy_start = time.perf_counter()
-
-    source_dzi = source_path.with_suffix(
-        ".dzi"
-    )
-
-    source_tiles = Path(
-        str(source_path) + "_files"
-    )
-
+    source_storage = deepzoom_storage_path(source_path, output_format)
+    destination_storage = deepzoom_storage_path(destination_path, output_format)
     source_thumbnail = (
         source_path.parent / "thumbnail.jpg"
     )
-
-    destination_dzi = destination_path.with_suffix(
-        ".dzi"
-    )
-
-    destination_tiles = Path(
-        str(destination_path) + "_files"
-    )
-
     destination_thumbnail = (
         destination_path.parent / "thumbnail.jpg"
     )
 
-    # -----------------------------------------------------
-    # Validate source
-    # -----------------------------------------------------
-
-    if not source_dzi.exists():
-        raise FileNotFoundError(
-            f"Source DZI not found:\n"
-            f"{source_dzi}"
-        )
-
-    if not source_tiles.exists():
-        raise FileNotFoundError(
-            f"Source tiles directory not found:\n"
-            f"{source_tiles}"
-        )
-
-    # -----------------------------------------------------
-    # Create destination directory
-    # -----------------------------------------------------
-
-    destination_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    destination_tiles.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # -----------------------------------------------------
-    # Copy .dzi
-    # -----------------------------------------------------
-
-    print(
-        "       Copying .dzi..."
-    )
-
-    shutil.copy2(
-        source_dzi,
-        destination_dzi,
-    )
-
-    # -----------------------------------------------------
-    # Copy thumbnail
-    # -----------------------------------------------------
-
-    if source_thumbnail.exists():
-
-        print(
-            "       Copying thumbnail..."
-        )
-
-        shutil.copy2(
-            source_thumbnail,
-            destination_thumbnail,
-        )
-
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_format in {"dzi", "szi", "zip"}:
+        if not source_storage.is_file():
+            raise FileNotFoundError(f"DeepZoom output not found:\n{source_storage}")
+        if output_format == "dzi":
+            source_tiles = Path(str(source_path) + "_files")
+            destination_tiles = Path(str(destination_path) + "_files")
+            if not source_tiles.is_dir():
+                raise FileNotFoundError(
+                    f"Source tiles directory not found:\n{source_tiles}"
+                )
+            print("       Copying .dzi descriptor...")
+            shutil.copy2(source_storage, destination_storage)
+            print(
+                f"       Copying tiles using robocopy "
+                f"(/MT:{ROBOCOPY_THREADS})..."
+            )
+            _robocopy_copy_tree(source_tiles, destination_tiles)
+        else:
+            print(f"       Copying {output_format.upper()} archive...")
+            shutil.copy2(source_storage, destination_storage)
     else:
-
+        if not source_storage.is_dir():
+            raise FileNotFoundError(
+                f"DeepZoom output directory not found:\n{source_storage}"
+            )
         print(
-            "       WARNING: "
-            "thumbnail.jpg not found."
+            f"       Copying {output_format} tiles using robocopy "
+            f"(/MT:{ROBOCOPY_THREADS})..."
         )
+        _robocopy_copy_tree(source_storage, destination_storage)
+        source_properties = source_path.parent / "vips-properties.xml"
+        if source_properties.is_file():
+            shutil.copy2(
+                source_properties,
+                destination_path.parent / "vips-properties.xml",
+            )
 
-    # -----------------------------------------------------
-    # Copy tiles using robocopy
-    # -----------------------------------------------------
-
-    print(
-        f"       Copying tiles "
-        f"using robocopy "
-        f"(/MT:{ROBOCOPY_THREADS})..."
-    )
-
-    command = [
-        "robocopy",
-
-        # Source
-        str(source_tiles),
-
-        # Destination
-        str(destination_tiles),
-
-        # Copy all subdirectories
-        "/E",
-
-        # Multi-threaded copy
-        f"/MT:{ROBOCOPY_THREADS}",
-
-        # Retry count
-        f"/R:{ROBOCOPY_RETRIES}",
-
-        # Wait between retries
-        f"/W:{ROBOCOPY_WAIT}",
-
-        # Don't list file names
-        "/NFL",
-
-        # Don't list directory names
-        "/NDL",
-
-        # Don't show progress
-        "/NP",
-
-        # Don't show headers
-        "/NJH",
-
-        # Don't show summary
-        "/NJS",
-    ]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-    )
-
-    # -----------------------------------------------------
-    # Robocopy exit codes
-    #
-    # 0-7 = success
-    # 8+  = failure
-    # -----------------------------------------------------
-
-    if result.returncode >= 8:
-
-        raise RuntimeError(
-            "Robocopy failed.\n\n"
-            f"Exit code: {result.returncode}\n\n"
-            f"STDOUT:\n{result.stdout}\n\n"
-            f"STDERR:\n{result.stderr}"
-        )
+    if source_thumbnail.is_file():
+        print("       Copying thumbnail...")
+        shutil.copy2(source_thumbnail, destination_thumbnail)
+    else:
+        print("       WARNING: thumbnail.jpg not found.")
 
     copy_elapsed = (
         time.perf_counter()
@@ -416,6 +327,32 @@ def copy_deepzoom(
     )
 
     return copy_elapsed
+
+
+def _robocopy_copy_tree(source_dir: Path, destination_dir: Path):
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        "robocopy",
+        str(source_dir),
+        str(destination_dir),
+        "/E",
+        f"/MT:{ROBOCOPY_THREADS}",
+        f"/R:{ROBOCOPY_RETRIES}",
+        f"/W:{ROBOCOPY_WAIT}",
+        "/NFL",
+        "/NDL",
+        "/NP",
+        "/NJH",
+        "/NJS",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode >= 8:
+        raise RuntimeError(
+            "Robocopy failed.\n\n"
+            f"Exit code: {result.returncode}\n\n"
+            f"STDOUT:\n{result.stdout}\n\n"
+            f"STDERR:\n{result.stderr}"
+        )
 
 
 # =========================================================
@@ -471,6 +408,7 @@ def convert_wsi(
         primary_folder
         / wsi_name
     )
+    primary_storage = deepzoom_storage_path(primary_output)
 
     primary_thumbnail = (
         primary_folder
@@ -484,9 +422,12 @@ def convert_wsi(
     metrics.update(
         {
             "input_file": str(input_file),
-            "deepzoom_output": f"{primary_output}.dzi",
+            "deepzoom_output": str(primary_storage),
             "thumbnail_output": str(primary_thumbnail),
-            "copy_outputs": [str(output) + ".dzi" for _, output in additional_outputs],
+            "copy_outputs": [
+                str(deepzoom_storage_path(output))
+                for _, output in additional_outputs
+            ],
         }
     )
 
@@ -512,7 +453,7 @@ def convert_wsi(
     print()
     print(
         f"Primary:"
-        f"\n  {primary_output}.dzi"
+        f"\n  {primary_storage}"
     )
 
     print()
@@ -525,7 +466,7 @@ def convert_wsi(
         print()
         print(
             f"Additional destination:"
-            f"\n  {destination_output}.dzi"
+            f"\n  {deepzoom_storage_path(destination_output)}"
         )
 
     try:
@@ -538,9 +479,7 @@ def convert_wsi(
         # Check what already exists
         # =================================================
 
-        dz_exists = deepzoom_exists(
-            primary_output
-        )
+        dz_exists = deepzoom_exists(primary_output)
 
         thumb_exists = thumbnail_exists(
             primary_folder
@@ -549,7 +488,7 @@ def convert_wsi(
         load_start = time.perf_counter()
         image = pyvips.Image.new_from_file(
             str(input_file),
-            access="sequential",
+            access="random",
         )
         load_elapsed = time.perf_counter() - load_start
         metrics["resolution"] = f"{image.width:,} x {image.height:,}"
@@ -610,11 +549,19 @@ def convert_wsi(
                 exist_ok=True,
             )
 
-            image.dzsave(
-                str(primary_output),
-                suffix=(
-                    f".jpeg[Q={JPEG_QUALITY}]"
+            dzsave_options = {
+                "layout": (
+                    "dz"
+                    if DEEPZOOM_FORMAT in {"dzi", "szi", "zip"}
+                    else DEEPZOOM_FORMAT
                 ),
+                "suffix": f".jpeg[Q={JPEG_QUALITY}]",
+            }
+            if DEEPZOOM_FORMAT in {"szi", "zip"}:
+                dzsave_options["container"] = DEEPZOOM_FORMAT
+            image.dzsave(
+                str(deepzoom_save_path(primary_output)),
+                **dzsave_options,
             )
 
             conversion_elapsed = (
@@ -753,9 +700,7 @@ def convert_wsi(
                 )
                 continue
 
-            destination_copy_elapsed = copy_deepzoom(
-                primary_output, destination_output
-            )
+            destination_copy_elapsed = copy_deepzoom(primary_output, destination_output)
             copy_elapsed += destination_copy_elapsed
             copy_results.append(
                 {
@@ -775,7 +720,10 @@ def convert_wsi(
                 metrics,
             )
             print()
-            print(f"DeepZoom copy complete: {destination_output}.dzi")
+            print(
+                "DeepZoom copy complete: "
+                f"{deepzoom_storage_path(destination_output)}"
+            )
             print(f"Copy time: {format_time(copy_elapsed)}")
         if not additional_outputs:
             report_progress(
@@ -908,6 +856,9 @@ def main():
         f" {JPEG_QUALITY}"
     )
 
+    print(f"DeepZoom output format: {DEEPZOOM_FORMAT}")
+    print(f"Input extensions: {', '.join(WSI_EXTENSIONS)}")
+
     print()
     print(
         f"Thumbnail max size:"
@@ -928,7 +879,7 @@ def main():
     )
 
     # =====================================================
-    # Find TIFF files
+    # Find files with enabled WSI extensions
     # =====================================================
 
     print()
@@ -937,16 +888,18 @@ def main():
     )
 
     if SELECTED_FILES is None:
-        tiff_files = sorted(
+        wsi_files = sorted(
             [
-                *INPUT_DIR.rglob("*.tif"),
-                *INPUT_DIR.rglob("*.tiff"),
+                path
+                for path in INPUT_DIR.rglob("*")
+                if path.is_file()
+                and path.name.lower().endswith(WSI_EXTENSIONS)
             ]
         )
     else:
-        tiff_files = sorted(Path(path) for path in SELECTED_FILES)
+        wsi_files = sorted(Path(path) for path in SELECTED_FILES)
 
-    total = len(tiff_files)
+    total = len(wsi_files)
     report_progress("ready", 0, 4, message=f"Found {total} slide(s)")
     completed = 0
     failed = 0
@@ -961,9 +914,7 @@ def main():
     if total == 0:
 
         print()
-        print(
-            "No TIFF files found."
-        )
+        print("No WSI files with the enabled extensions were found.")
 
         return {
             "total": 0,
@@ -984,7 +935,7 @@ def main():
     # =====================================================
 
     for current, input_file in enumerate(
-        tiff_files,
+        wsi_files,
         start=1,
     ):
         PROGRESS_FILE_INDEX = current

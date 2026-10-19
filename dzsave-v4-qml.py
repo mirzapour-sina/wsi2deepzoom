@@ -1,7 +1,10 @@
+import os
 import queue
 import sys
 import threading
 import time
+
+os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot, Property
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
@@ -31,7 +34,7 @@ class DzSaveController(QObject):
         self._fields = dict(common.DEFAULTS)
         self._destinations = list(common.DEFAULT_DESTINATIONS)
         self._files = []
-        self._status = "Ready. Scan for TIFF files or start conversion."
+        self._status = "Ready. Scan for WSI files or start conversion."
         self._log = ""
         self._progress = 0
         self._progress_max = 1
@@ -62,6 +65,13 @@ class DzSaveController(QObject):
     @Property("QVariantMap", notify=fieldsChanged)
     def fields(self):
         return dict(self._fields)
+
+    @Property("QVariantList")
+    def deepzoomFormats(self):
+        return [
+            {"value": value, "label": option["label"]}
+            for value, option in common.DEEPZOOM_FORMATS.items()
+        ]
 
     @Property("QVariantList", notify=destinationsChanged)
     def destinations(self):
@@ -101,7 +111,7 @@ class DzSaveController(QObject):
     @Property(str, notify=selectionChanged)
     def selectionSummary(self):
         selected = sum(1 for item in self._files if item["checked"])
-        return f"{selected:,} of {len(self._files):,} TIFF file(s) selected."
+        return f"{selected:,} of {len(self._files):,} WSI file(s) selected."
 
     @Slot(int, bool)
     def setFileSelected(self, index, checked):
@@ -222,16 +232,17 @@ class DzSaveController(QObject):
         if self._busy:
             return
         folder = self._fields["input_dir"]
+        extensions = self._fields["wsi_extensions"]
         self._set_busy(True)
         self._files = []
         self.filesChanged.emit()
         self.selectionChanged.emit()
-        self._status = "Searching for TIFF files..."
+        self._status = "Searching for WSI files..."
         self.statusChanged.emit()
 
         def worker():
             try:
-                files = common.find_wsi_files(folder)
+                files = common.find_wsi_files(folder, extensions)
                 self.events.put(("scan_done", [str(path) for path in files]))
             except Exception as error:
                 self.events.put(("error", str(error)))
@@ -381,7 +392,7 @@ class DzSaveController(QObject):
                     ]
                     self.filesChanged.emit()
                     self.selectionChanged.emit()
-                    self._status = f"Found {len(payload):,} TIFF file(s)."
+                    self._status = f"Found {len(payload):,} WSI file(s)."
                     self.statusChanged.emit()
             elif event == "error":
                 self._append_log(f"\nError: {payload}\n")

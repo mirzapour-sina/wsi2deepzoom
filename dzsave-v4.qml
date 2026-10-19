@@ -149,7 +149,7 @@ ApplicationWindow {
         }
 
         GroupBox {
-            title: "Found TIFF files (checked files will be converted)"
+            title: "Found WSI files (checked files will be converted)"
             Layout.fillWidth: true
             Layout.preferredHeight: 190
 
@@ -238,6 +238,30 @@ ApplicationWindow {
                         TextField {
                             text: controller.fields["thumbnail_quality"]
                             onTextEdited: controller.setField("thumbnail_quality", text)
+                        }
+                        Label { text: "DeepZoom output format" }
+                        ComboBox {
+                            id: outputFormatSelector
+                            objectName: "outputFormatSelector"
+                            textRole: "label"
+                            valueRole: "value"
+                            model: controller.deepzoomFormats
+                            currentIndex: indexOfValue(controller.fields["deepzoom_format"])
+                            onActivated: controller.setField("deepzoom_format", currentValue)
+                            Component.onCompleted: {
+                                currentIndex = indexOfValue(controller.fields["deepzoom_format"])
+                            }
+                        }
+                        Label { text: "WSI extensions (comma-separated)" }
+                        TextField {
+                            text: controller.fields["wsi_extensions"]
+                            onTextEdited: controller.setField("wsi_extensions", text)
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: "Extensions must be supported by installed libvips loaders."
+                            Layout.columnSpan: 2
+                            wrapMode: Text.Wrap
                         }
                     }
                 }

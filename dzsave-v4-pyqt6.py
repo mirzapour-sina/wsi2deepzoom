@@ -6,6 +6,7 @@ import time
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -59,7 +60,11 @@ class DzSaveWindow(QMainWindow):
         self.fields = {
             key: QLineEdit(value)
             for key, value in common.DEFAULTS.items()
+            if key != "deepzoom_format"
         }
+        self.deepzoom_format = QComboBox()
+        for value, option in common.DEEPZOOM_FORMATS.items():
+            self.deepzoom_format.addItem(option["label"], value)
         self.setWindowTitle("WSI DeepZoom Converter - PyQt6")
         self.resize(1000, 980)
         self.setMinimumSize(780, 740)
@@ -121,6 +126,13 @@ class DzSaveWindow(QMainWindow):
         )
         for key, label in labels:
             settings_layout.addRow(label, self.fields[key])
+        settings_layout.addRow("DeepZoom output format", self.deepzoom_format)
+        settings_layout.addRow(
+            "WSI file extensions (comma-separated)", self.fields["wsi_extensions"]
+        )
+        settings_layout.addRow(
+            QLabel("Extensions must be supported by your installed libvips loaders.")
+        )
         add_collapsible_section(
             options_layout, "DeepZoom and thumbnail", settings_box
         )
@@ -138,10 +150,10 @@ class DzSaveWindow(QMainWindow):
         self.options_toggle.toggled.connect(options_container.setVisible)
         layout.addWidget(options_container)
 
-        selection = QGroupBox("Found TIFF files (checked files will be converted)")
+        selection = QGroupBox("Found WSI files (checked files will be converted)")
         selection_layout = QVBoxLayout(selection)
         selection_tools = QHBoxLayout()
-        self.selection_count = QLabel("Scan a source folder to list TIFF files.")
+        self.selection_count = QLabel("Scan a source folder to list WSI files.")
         selection_tools.addWidget(self.selection_count)
         selection_tools.addStretch(1)
         self.select_all_button = QPushButton("Select all")
@@ -159,7 +171,7 @@ class DzSaveWindow(QMainWindow):
 
         activity = QGroupBox()
         activity_layout = QVBoxLayout(activity)
-        self.status = QLabel("Ready. Scan for TIFF files or start conversion.")
+        self.status = QLabel("Ready. Scan for WSI files or start conversion.")
         activity_layout.addWidget(self.status)
         self.log_toggle = QToolButton()
         self.log_toggle.setText("Show detailed text output")
@@ -349,7 +361,7 @@ class DzSaveWindow(QMainWindow):
             for index in range(self.file_list.count())
         )
         self.selection_count.setText(
-            f"{selected:,} of {len(self.scanned_files):,} TIFF file(s) selected."
+            f"{selected:,} of {len(self.scanned_files):,} WSI file(s) selected."
         )
 
     def _selected_files(self):
@@ -366,12 +378,13 @@ class DzSaveWindow(QMainWindow):
         self.scanned_files = []
         self.file_list.clear()
         self._update_selection_count()
-        self.status.setText("Searching for TIFF files...")
+        self.status.setText("Searching for WSI files...")
         folder = self.fields["input_dir"].text()
+        extensions = self.fields["wsi_extensions"].text()
 
         def worker():
             try:
-                self.events.put(("scan_done", common.find_wsi_files(folder)))
+                self.events.put(("scan_done", common.find_wsi_files(folder, extensions)))
             except Exception as error:
                 self.events.put(("error", str(error)))
                 self.events.put(("scan_done", None))
@@ -383,7 +396,10 @@ class DzSaveWindow(QMainWindow):
             return
         try:
             settings = common.validate_settings(
-                {key: field.text() for key, field in self.fields.items()},
+                {
+                    **{key: field.text() for key, field in self.fields.items()},
+                    "deepzoom_format": self.deepzoom_format.currentData(),
+                },
                 self._selected_files(),
                 [field.text() for field in self.destination_fields],
             )
@@ -485,7 +501,7 @@ class DzSaveWindow(QMainWindow):
                         self.file_list.addItem(item)
                     self.file_list.blockSignals(False)
                     self._update_selection_count()
-                    self.status.setText(f"Found {len(payload):,} TIFF file(s).")
+                    self.status.setText(f"Found {len(payload):,} WSI file(s).")
             elif event == "error":
                 self.log.append(f"\nError: {payload}")
                 QMessageBox.critical(self, "Operation failed", payload)

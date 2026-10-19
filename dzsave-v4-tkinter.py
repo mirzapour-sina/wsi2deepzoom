@@ -120,6 +120,25 @@ class DzSaveWindow:
             ttk.Entry(cell, textvariable=self.values[key], width=10).pack(
                 fill=tk.X, pady=(4, 0)
             )
+        ttk.Label(settings, text="DeepZoom output format").grid(
+            row=1, column=0, sticky="w", padx=4, pady=(10, 0)
+        )
+        ttk.Combobox(
+            settings,
+            textvariable=self.values["deepzoom_format"],
+            values=tuple(common.DEEPZOOM_FORMATS),
+            state="readonly",
+        ).grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
+        ttk.Label(settings, text="WSI file extensions (comma-separated)").grid(
+            row=1, column=1, columnspan=2, sticky="w", padx=4, pady=(10, 0)
+        )
+        ttk.Entry(settings, textvariable=self.values["wsi_extensions"]).grid(
+            row=2, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0)
+        )
+        ttk.Label(
+            settings,
+            text="Extensions must be supported by your installed libvips loaders.",
+        ).grid(row=3, column=1, columnspan=2, sticky="w", padx=4, pady=(2, 0))
 
         copy_settings = ttk.LabelFrame(options, padding=10)
         self.copy_settings_frame = copy_settings
@@ -151,7 +170,7 @@ class DzSaveWindow:
 
         selection = ttk.LabelFrame(
             main,
-            text="Found TIFF files (selected files will be converted)",
+            text="Found WSI files (selected files will be converted)",
             padding=8,
         )
         self.selection_frame = selection
@@ -160,7 +179,7 @@ class DzSaveWindow:
         selection.rowconfigure(1, weight=1)
         selection_tools = ttk.Frame(selection)
         selection_tools.grid(row=0, column=0, sticky="ew")
-        self.selection_count = tk.StringVar(value="Scan a source folder to list TIFF files.")
+        self.selection_count = tk.StringVar(value="Scan a source folder to list WSI files.")
         ttk.Label(selection_tools, textvariable=self.selection_count).pack(side=tk.LEFT)
         ttk.Button(selection_tools, text="Select all", command=self._select_all).pack(
             side=tk.RIGHT, padx=(6, 0)
@@ -194,7 +213,7 @@ class DzSaveWindow:
         activity.grid(row=7, column=0, sticky="ew")
         activity.columnconfigure(0, weight=1)
         activity.rowconfigure(8, weight=1)
-        self.status = tk.StringVar(value="Ready. Scan for TIFF files or start conversion.")
+        self.status = tk.StringVar(value="Ready. Scan for WSI files or start conversion.")
         ttk.Label(activity, textvariable=self.status).grid(
             row=0, column=0, sticky="w", pady=(0, 6)
         )
@@ -458,16 +477,22 @@ class DzSaveWindow:
             return
         self._scroll_to_widget(self.selection_frame)
         folder = self.values["input_dir"].get()
+        extensions = self.values["wsi_extensions"].get()
         self.file_list.configure(state=tk.NORMAL)
         self.file_list.delete(0, tk.END)
         self.scanned_files = []
-        self.selection_count.set("Scanning for TIFF files...")
+        self.selection_count.set("Scanning for WSI files...")
         self._set_busy(True)
-        self.status.set("Searching for TIFF files...")
+        self.status.set("Searching for WSI files...")
 
         def worker():
             try:
-                self.events.put(("scan_done", common.find_wsi_files(folder)))
+                self.events.put(
+                    (
+                        "scan_done",
+                        common.find_wsi_files(folder, extensions),
+                    )
+                )
             except Exception as error:
                 self.events.put(("error", str(error)))
                 self.events.put(("scan_done", None))
@@ -584,7 +609,7 @@ class DzSaveWindow:
                         self.file_list.insert(tk.END, str(path))
                     self.file_list.selection_set(0, tk.END)
                     self._update_selection_count()
-                    self.status.set(f"Found {len(payload):,} TIFF file(s).")
+                    self.status.set(f"Found {len(payload):,} WSI file(s).")
             elif event == "error":
                 self._append_log(f"\nError: {payload}\n")
                 messagebox.showerror("Operation failed", payload)
@@ -732,7 +757,7 @@ class DzSaveWindow:
     def _update_selection_count(self, _event=None):
         selected = len(self.file_list.curselection())
         self.selection_count.set(
-            f"{selected:,} of {len(self.scanned_files):,} TIFF file(s) selected."
+            f"{selected:,} of {len(self.scanned_files):,} WSI file(s) selected."
         )
 
     def _select_all(self):

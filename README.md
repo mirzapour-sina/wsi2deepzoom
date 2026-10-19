@@ -97,14 +97,32 @@ py -3.10 .\dzsave-v4.py
 ## Build executables
 
 The build script supports PyInstaller, Nuitka, and cx_Freeze, with four GUI
-choices. The interactive menu lets you choose one or more packagers, GUIs, and
-layouts:
+choices. Use the graphical build selector to choose one or more packagers,
+GUIs, and layouts:
+
+```powershell
+py -3.10 .\build_executables_gui.py
+```
+
+The command-line interactive menu offers the same selections:
 
 ```powershell
 py -3.10 .\build_executables.py --interactive
 ```
 
-Menu choices are entered as comma-separated numbers; `0` or Enter selects all.
+The graphical selector also lets you specify the libvips `bin` directory;
+leave it blank to use automatic detection. cx_Freeze only supports onedir
+builds, and unsupported one-file combinations are reported as skipped.
+To rebuild the standalone graphical selector after changing its source, run:
+
+```powershell
+py -3.10 .\build_builder_gui.py
+```
+
+This writes `WSI-DeepZoom-Builder.exe` into the project folder. Launch that
+executable to build the current project sources; it uses the installed Python
+3.10 launcher and the live `build_executables.py`.
+
 The build script also accepts non-interactive options:
 
 ```powershell

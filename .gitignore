@@ -19,6 +19,7 @@ ENV/
 /dist/
 *.egg-info/
 *.spec
+/WSI-DeepZoom-Builder.exe
 
 # Local editor and operating-system metadata
 .vscode/

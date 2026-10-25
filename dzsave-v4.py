@@ -2,7 +2,9 @@ from pathlib import Path
 import copy
 import shutil
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dzsave_v4_gui_common as common
 
@@ -80,6 +82,14 @@ ROBOCOPY_THREADS = 16
 ROBOCOPY_RETRIES = 2
 
 ROBOCOPY_WAIT = 1
+
+
+# ---------------------------------------------------------
+# Conversion threading
+# ---------------------------------------------------------
+
+CONVERSION_THREADS = 4
+
 WSI_EXTENSIONS = (
     ".tif",
     ".tiff",
@@ -373,6 +383,7 @@ def convert_wsi(
     input_file: Path,
     current: int,
     total: int,
+    _output=None,
 ):
     """
     Convert one WSI to DeepZoom once.
@@ -396,6 +407,9 @@ def convert_wsi(
         "thumbnail_status": "Pending",
         "copy_destinations": [],
     }
+    if _output is not None:
+        _output.clear()
+        _output.update(metrics)
     LAST_CONVERSION_METRICS = metrics
     report_progress("preparing", 0, 4, input_file, "Preparing slide", metrics)
 
@@ -701,78 +715,92 @@ def convert_wsi(
 
         copy_elapsed = 0
         copy_results = []
-        for index, (destination_folder, destination_output) in enumerate(
-            additional_outputs, start=1
-        ):
-            report_progress(
-                "copy",
-                2 + index / max(1, len(additional_outputs)),
-                4,
-                input_file,
-                f"Copying to destination {index} of {len(additional_outputs)}",
-                metrics,
-            )
-            secondary_exists = deepzoom_exists(destination_output)
-            secondary_thumbnail_exists = (
-                destination_folder / "thumbnail.jpg"
-            ).exists()
+        _copy_lock = threading.Lock()
 
-            if secondary_exists and secondary_thumbnail_exists:
-                copy_results.append(
-                    {
+        if additional_outputs:
+            def copy_one_destination(index, destination_folder, destination_output):
+                report_progress(
+                    "copy",
+                    2 + index / max(1, len(additional_outputs)),
+                    4,
+                    input_file,
+                    f"Copying to destination {index} of {len(additional_outputs)}",
+                    metrics,
+                )
+                secondary_exists = deepzoom_exists(destination_output)
+                secondary_thumbnail_exists = (
+                    destination_folder / "thumbnail.jpg"
+                ).exists()
+
+                if secondary_exists and secondary_thumbnail_exists:
+                    result = {
                         "destination": str(destination_folder),
                         "status": "Skipped (already exists)",
                         "duration_seconds": 0,
                     }
-                )
-                metrics["copy_destinations"] = copy_results
-                print(
-                    f"DeepZoom and thumbnail already exist at "
-                    f"{destination_folder}. Skipping copy."
-                )
-                continue
+                    with _copy_lock:
+                        copy_results.append(result)
+                        metrics["copy_destinations"] = list(copy_results)
+                    print(
+                        f"DeepZoom and thumbnail already exist at "
+                        f"{destination_folder}. Skipping copy."
+                    )
+                    return index, result, 0, destination_output
 
-            try:
-                destination_copy_elapsed = copy_deepzoom(
-                    primary_output, destination_output
-                )
-            except Exception as copy_error:
-                copy_results.append(
-                    {
+                try:
+                    destination_copy_elapsed = copy_deepzoom(
+                        primary_output, destination_output
+                    )
+                except Exception as copy_error:
+                    result = {
                         "destination": str(destination_folder),
                         "status": f"Failed: {copy_error}",
                         "duration_seconds": 0,
                     }
-                )
-                metrics["copy_destinations"] = copy_results
-                print(f"Copy to {destination_folder} failed: {copy_error}")
-                continue
+                    with _copy_lock:
+                        copy_results.append(result)
+                        metrics["copy_destinations"] = list(copy_results)
+                    print(f"Copy to {destination_folder} failed: {copy_error}")
+                    return index, result, 0, destination_output
 
-            copy_elapsed += destination_copy_elapsed
-            copy_results.append(
-                {
+                result = {
                     "destination": str(destination_folder),
                     "status": "Complete",
                     "duration_seconds": destination_copy_elapsed,
                 }
-            )
-            metrics["copy_seconds"] = copy_elapsed
-            metrics["copy_destinations"] = copy_results
-            report_progress(
-                "copy",
-                3,
-                4,
-                input_file,
-                f"Destination {index} copy complete",
-                metrics,
-            )
-            print()
-            print(
-                "DeepZoom copy complete: "
-                f"{deepzoom_storage_path(destination_output)}"
-            )
-            print(f"Copy time: {format_time(copy_elapsed)}")
-        if not additional_outputs:
+                with _copy_lock:
+                    copy_results.append(result)
+                    metrics["copy_destinations"] = list(copy_results)
+                return index, result, destination_copy_elapsed, destination_output
+
+            with ThreadPoolExecutor(max_workers=CONVERSION_THREADS) as copy_executor:
+                futures = [
+                    copy_executor.submit(
+                        copy_one_destination, index, folder, output
+                    )
+                    for index, (folder, output) in enumerate(
+                        additional_outputs, start=1
+                    )
+                ]
+                for future in as_completed(futures):
+                    index, result, duration, dest_output = future.result()
+                    copy_elapsed += duration
+                    metrics["copy_seconds"] = copy_elapsed
+                    report_progress(
+                        "copy",
+                        3,
+                        4,
+                        input_file,
+                        f"Destination {index} copy complete",
+                        metrics,
+                    )
+                    print()
+                    print(
+                        "DeepZoom copy complete: "
+                        f"{deepzoom_storage_path(dest_output)}"
+                    )
+                    print(f"Copy time: {format_time(copy_elapsed)}")
+        else:
             report_progress(
                 "copy", 3, 4, input_file, "No additional destinations to copy"
             )

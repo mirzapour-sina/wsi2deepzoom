@@ -1,9 +1,18 @@
 from pathlib import Path
 import copy
-import pyvips
 import shutil
 import subprocess
 import time
+
+import dzsave_v4_gui_common as common
+
+try:
+    import pyvips
+except ImportError as error:
+    raise ImportError(
+        "pyvips is required to run the WSI converter. "
+        "Install it with: pip install pyvips (and install libvips separately)."
+    ) from error
 
 
 # =========================================================
@@ -98,6 +107,7 @@ LAST_CONVERSION_ERROR = None
 LAST_CONVERSION_DURATION = None
 LAST_CONVERSION_METRICS = {}
 RUN_START_PERF = None
+_SCAN_CACHE = {}
 
 
 def report_progress(stage, current, total, input_file=None, message="", metrics=None):
@@ -389,9 +399,14 @@ def convert_wsi(
     LAST_CONVERSION_METRICS = metrics
     report_progress("preparing", 0, 4, input_file, "Preparing slide", metrics)
 
-    folder_name = input_file.parent.name
-
     wsi_name = input_file.stem
+
+    try:
+        rel_path = input_file.relative_to(INPUT_DIR)
+    except ValueError:
+        rel_path = Path(input_file.name)
+    rel_folder = rel_path.parent
+    folder_name = str(rel_folder) if str(rel_folder) != "." else wsi_name
 
     # -----------------------------------------------------
     # Primary output
@@ -485,24 +500,41 @@ def convert_wsi(
             primary_folder
         )
 
-        load_start = time.perf_counter()
-        image = pyvips.Image.new_from_file(
-            str(input_file),
-            access="random",
-        )
-        load_elapsed = time.perf_counter() - load_start
-        metrics["resolution"] = f"{image.width:,} x {image.height:,}"
-        metrics["load_seconds"] = load_elapsed
-        report_progress(
-            "preparing",
-            0,
-            4,
-            input_file,
-            "Source image loaded",
-            metrics,
-        )
-        print(f"Image size: {image.width:,} x {image.height:,}")
-        print(f"Load time: {format_time(load_elapsed)}")
+        if dz_exists and thumb_exists:
+            metrics["deepzoom_status"] = "Skipped (already exists)"
+            metrics["thumbnail_status"] = "Skipped (already exists)"
+            report_progress(
+                "preparing",
+                0,
+                4,
+                input_file,
+                "Already converted",
+                metrics,
+            )
+            print()
+            print("DeepZoom and thumbnail already exist. Skipping image load.")
+            image = None
+            load_elapsed = 0
+            metrics["load_seconds"] = load_elapsed
+        else:
+            load_start = time.perf_counter()
+            image = pyvips.Image.new_from_file(
+                str(input_file),
+                access="random",
+            )
+            load_elapsed = time.perf_counter() - load_start
+            metrics["resolution"] = f"{image.width:,} x {image.height:,}"
+            metrics["load_seconds"] = load_elapsed
+            report_progress(
+                "preparing",
+                0,
+                4,
+                input_file,
+                "Source image loaded",
+                metrics,
+            )
+            print(f"Image size: {image.width:,} x {image.height:,}")
+            print(f"Load time: {format_time(load_elapsed)}")
 
         # =================================================
         # STEP 1
@@ -700,7 +732,22 @@ def convert_wsi(
                 )
                 continue
 
-            destination_copy_elapsed = copy_deepzoom(primary_output, destination_output)
+            try:
+                destination_copy_elapsed = copy_deepzoom(
+                    primary_output, destination_output
+                )
+            except Exception as copy_error:
+                copy_results.append(
+                    {
+                        "destination": str(destination_folder),
+                        "status": f"Failed: {copy_error}",
+                        "duration_seconds": 0,
+                    }
+                )
+                metrics["copy_destinations"] = copy_results
+                print(f"Copy to {destination_folder} failed: {copy_error}")
+                continue
+
             copy_elapsed += destination_copy_elapsed
             copy_results.append(
                 {
@@ -825,6 +872,48 @@ def main():
     global LAST_CONVERSION_METRICS, RUN_START_PERF
     global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
 
+    # -----------------------------------------------------
+    # Validate configuration before doing any work
+    # -----------------------------------------------------
+
+    if DEEPZOOM_FORMAT not in {
+        "dzi", "szi", "zip", "zoomify", "google", "iiif", "iiif3",
+    }:
+        raise ValueError(
+            f"Unsupported DeepZoom output format: {DEEPZOOM_FORMAT!r}. "
+            "Supported formats: dzi, szi, zip, zoomify, google, iiif, iiif3."
+        )
+
+    if not INPUT_DIR.is_dir():
+        print()
+        print("=" * 80)
+        print("WSI → DeepZoom + Thumbnail Converter")
+        print("=" * 80)
+        print()
+        print(
+            f"Input directory:"
+            f"\n  {INPUT_DIR}"
+        )
+        print()
+        print(
+            "ERROR: Input directory does not exist or is not accessible: "
+            f"{INPUT_DIR}"
+        )
+        print()
+        print(
+            "Please set INPUT_DIR to an existing folder containing WSI files."
+        )
+        return {
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "duration_seconds": 0,
+            "results": [],
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "average_seconds": None,
+            "error": f"Input directory does not exist: {INPUT_DIR}",
+        }
+
     total_start = time.perf_counter()
     RUN_START_PERF = total_start
     run_started = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -888,14 +977,10 @@ def main():
     )
 
     if SELECTED_FILES is None:
-        wsi_files = sorted(
-            [
-                path
-                for path in INPUT_DIR.rglob("*")
-                if path.is_file()
-                and path.name.lower().endswith(WSI_EXTENSIONS)
-            ]
-        )
+        scan_key = str(INPUT_DIR.resolve())
+        if scan_key not in _SCAN_CACHE:
+            _SCAN_CACHE[scan_key] = common.find_wsi_files(INPUT_DIR, WSI_EXTENSIONS)
+        wsi_files = _SCAN_CACHE[scan_key]
     else:
         wsi_files = sorted(Path(path) for path in SELECTED_FILES)
 

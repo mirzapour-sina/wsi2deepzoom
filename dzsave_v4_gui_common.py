@@ -35,6 +35,7 @@ APP_DIR = _get_app_dir()
 
 CONVERTER_PATH = APP_DIR / "dzsave-v4.py"
 _VIPS_DLL_HANDLES = []
+_VIPS_DLL_PATHS = set()
 DEFAULTS = {
     "input_dir": r"D:\Edupat\Urmia-Medical-University\WSI",
     "wsi_extensions": ".tif, .tiff, .svs, .ndpi, .mrxs, .scn, .vms, .vmu, .bif, .svslide, .vsi, .isyntax, .qptiff, .ome.tif, .ome.tiff",
@@ -85,9 +86,15 @@ def find_wsi_files(input_dir, extensions=None):
         extensions = parse_wsi_extensions(DEFAULTS["wsi_extensions"])
     elif isinstance(extensions, str):
         extensions = parse_wsi_extensions(extensions)
+    try:
+        all_files = list(input_dir.rglob("*"))
+    except PermissionError as error:
+        raise ValueError(
+            f"Permission denied while scanning input folder: {input_dir}"
+        ) from error
     return sorted(
         path
-        for path in input_dir.rglob("*")
+        for path in all_files
         if path.is_file()
         and path.name.lower().endswith(
             tuple(extension.lower() for extension in extensions)
@@ -233,13 +240,13 @@ def run_conversion(settings, events):
                 ):
                     vips_dir = APP_DIR / "vips"
                     if vips_dir.is_dir():
-                        os.environ["PATH"] = (
-                            str(vips_dir) + os.pathsep + os.environ.get("PATH", "")
-                        )
-                        if os.name == "nt" and hasattr(os, "add_dll_directory"):
-                            _VIPS_DLL_HANDLES.append(
-                                os.add_dll_directory(str(vips_dir))
-                            )
+                        vips_dir_str = str(vips_dir)
+                        if vips_dir_str not in _VIPS_DLL_PATHS:
+                            _VIPS_DLL_PATHS.add(vips_dir_str)
+                            if os.name == "nt" and hasattr(os, "add_dll_directory"):
+                                _VIPS_DLL_HANDLES.append(
+                                    os.add_dll_directory(vips_dir_str)
+                                )
 
                     spec = importlib.util.spec_from_file_location(
                         "dzsave_v4_converter", CONVERTER_PATH

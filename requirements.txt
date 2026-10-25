@@ -1,0 +1,6 @@
+# Core runtime dependencies for the WSI -> DeepZoom converter GUI
+PySide6>=6.4
+pyvips>=2.2
+
+# Test dependencies
+pytest>=7.0

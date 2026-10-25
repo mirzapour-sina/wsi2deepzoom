@@ -11,6 +11,15 @@ ApplicationWindow {
     minimumHeight: 740
     title: "WSI DeepZoom Converter - QML"
 
+    function indexOfValue(value) {
+        for (var i = 0; i < controller.deepzoomFormats.length; i++) {
+            if (controller.deepzoomFormats[i].value === value) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     component ActionButton: Button {
         id: control
         property bool primary: false

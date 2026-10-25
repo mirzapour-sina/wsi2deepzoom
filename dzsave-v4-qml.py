@@ -66,7 +66,9 @@ class DzSaveController(QObject):
     def fields(self):
         return dict(self._fields)
 
-    @Property("QVariantList")
+    deepzoomFormatsChanged = Signal()
+
+    @Property("QVariantList", notify=deepzoomFormatsChanged)
     def deepzoomFormats(self):
         return [
             {"value": value, "label": option["label"]}
@@ -464,8 +466,10 @@ def main():
         lambda message: QMessageBox.critical(None, "Operation failed", message)
     )
     if "--self-test" in sys.argv[1:]:
-        engine.rootObjects()[0].close()
-        return 0
+        # Run the event loop briefly so QML bindings resolve the controller
+        # context property, then quit automatically.
+        QTimer.singleShot(3000, lambda: app.quit())
+        return app.exec()
     return app.exec()
 
 

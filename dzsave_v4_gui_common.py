@@ -46,6 +46,7 @@ DEFAULTS = {
     "robocopy_threads": "16",
     "robocopy_retries": "2",
     "robocopy_wait": "1",
+    "conversion_threads": "4",
 }
 DEFAULT_DESTINATIONS = [r"D:\Edupat\Deepzoom"]
 DEEPZOOM_FORMATS = {
@@ -143,6 +144,7 @@ def validate_settings(values, selected_files=None, destinations=None):
             "robocopy_threads": int(values["robocopy_threads"]),
             "robocopy_retries": int(values["robocopy_retries"]),
             "robocopy_wait": int(values["robocopy_wait"]),
+            "conversion_threads": int(values.get("conversion_threads", DEFAULTS["conversion_threads"])),
         }
     except (TypeError, ValueError) as error:
         raise ValueError("All numeric conversion settings must be whole numbers.") from error
@@ -155,6 +157,8 @@ def validate_settings(values, selected_files=None, destinations=None):
         raise ValueError("Thumbnail quality must be between 1 and 100.")
     if not 1 <= settings["robocopy_threads"] <= 128:
         raise ValueError("Copy threads must be between 1 and 128.")
+    if not 1 <= settings["conversion_threads"] <= 128:
+        raise ValueError("Conversion threads must be between 1 and 128.")
     if settings["robocopy_retries"] < 0 or settings["robocopy_wait"] < 0:
         raise ValueError("Copy retries and retry wait cannot be negative.")
 
@@ -264,6 +268,7 @@ def run_conversion(settings, events):
                     converter.ROBOCOPY_THREADS = settings["robocopy_threads"]
                     converter.ROBOCOPY_RETRIES = settings["robocopy_retries"]
                     converter.ROBOCOPY_WAIT = settings["robocopy_wait"]
+                    converter.CONVERSION_THREADS = settings["conversion_threads"]
                     converter.SELECTED_FILES = settings.get("selected_files")
                     converter.WSI_EXTENSIONS = settings["wsi_extensions"]
                     converter.DEEPZOOM_FORMAT = settings["deepzoom_format"]

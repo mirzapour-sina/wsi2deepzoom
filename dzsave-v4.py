@@ -2,7 +2,9 @@ from pathlib import Path
 import copy
 import shutil
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dzsave_v4_gui_common as common
 
@@ -80,6 +82,14 @@ ROBOCOPY_THREADS = 16
 ROBOCOPY_RETRIES = 2
 
 ROBOCOPY_WAIT = 1
+
+
+# ---------------------------------------------------------
+# Conversion threading
+# ---------------------------------------------------------
+
+CONVERSION_THREADS = 4
+
 WSI_EXTENSIONS = (
     ".tif",
     ".tiff",
@@ -373,6 +383,7 @@ def convert_wsi(
     input_file: Path,
     current: int,
     total: int,
+    _output=None,
 ):
     """
     Convert one WSI to DeepZoom once.
@@ -381,6 +392,10 @@ def convert_wsi(
 
     Then copies the DeepZoom and thumbnail
     to any additional destinations.
+
+    When _output is a dict, the per-slide metrics are written into it
+    (instead of the module-level LAST_CONVERSION_METRICS) so that
+    concurrent conversions do not clobber each other's results.
     """
 
     global LAST_CONVERSION_METRICS
@@ -396,6 +411,9 @@ def convert_wsi(
         "thumbnail_status": "Pending",
         "copy_destinations": [],
     }
+    if _output is not None:
+        _output.clear()
+        _output.update(metrics)
     LAST_CONVERSION_METRICS = metrics
     report_progress("preparing", 0, 4, input_file, "Preparing slide", metrics)
 
@@ -701,6 +719,7 @@ def convert_wsi(
 
         copy_elapsed = 0
         copy_results = []
+
         for index, (destination_folder, destination_output) in enumerate(
             additional_outputs, start=1
         ):
@@ -1019,10 +1038,9 @@ def main():
     # Process files
     # =====================================================
 
-    for current, input_file in enumerate(
-        wsi_files,
-        start=1,
-    ):
+    def _process_one(current, input_file):
+        global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
+        global LAST_CONVERSION_ERROR, LAST_CONVERSION_DURATION, LAST_CONVERSION_METRICS
         PROGRESS_FILE_INDEX = current
         PROGRESS_FILE_TOTAL = total
         report_progress(
@@ -1036,68 +1054,94 @@ def main():
         LAST_CONVERSION_ERROR = None
         LAST_CONVERSION_DURATION = None
         LAST_CONVERSION_METRICS = {}
+        output = {}
         elapsed = convert_wsi(
             input_file,
             current,
             total,
+            _output=output,
         )
-        results.append(
-            {
-                "file": str(input_file),
-                "status": "complete" if elapsed is not None else "failed",
-                "duration_seconds": (
-                    elapsed
-                    if elapsed is not None
-                    else LAST_CONVERSION_DURATION
-                ),
-                "error": LAST_CONVERSION_ERROR or "",
-                **LAST_CONVERSION_METRICS,
-            }
-        )
+        return {
+            "current": current,
+            "input_file": input_file,
+            "elapsed": elapsed,
+            "output": output,
+            "error": LAST_CONVERSION_ERROR or "",
+            "duration": LAST_CONVERSION_DURATION,
+        }
 
-        if elapsed is None:
-
-            failed += 1
-
-        else:
-
-            completed += 1
-
-            processing_times.append(
-                elapsed
+    with ThreadPoolExecutor(max_workers=CONVERSION_THREADS) as executor:
+        futures = [
+            executor.submit(
+                _process_one, current, input_file
+            )
+            for current, input_file in enumerate(wsi_files, start=1)
+        ]
+        for future in as_completed(futures):
+            item = future.result()
+            current = item["current"]
+            input_file = item["input_file"]
+            elapsed = item["elapsed"]
+            output = item["output"]
+            PROGRESS_FILE_INDEX = current
+            PROGRESS_FILE_TOTAL = total
+            results.append(
+                {
+                    "file": str(input_file),
+                    "status": "complete" if elapsed is not None else "failed",
+                    "duration_seconds": (
+                        elapsed
+                        if elapsed is not None
+                        else item["duration"]
+                    ),
+                    "error": item["error"],
+                    **output,
+                }
             )
 
-        # -------------------------------------------------
-        # Overall progress
-        # -------------------------------------------------
+            if elapsed is None:
 
-        overall_elapsed = (
-            time.perf_counter()
-            - total_start
-        )
+                failed += 1
 
-        percentage = (
-            current / total
-        ) * 100
-        report_progress(
-            "complete" if elapsed is not None else "error",
-            4,
-            4,
-            input_file,
-            f"Completed {current} of {total} slides",
-        )
+            else:
 
-        print()
-        print(
-            f"Overall progress: "
-            f"{current}/{total} "
-            f"({percentage:.1f}%)"
-        )
+                completed += 1
 
-        print(
-            f"Total elapsed: "
-            f"{format_time(overall_elapsed)}"
-        )
+                processing_times.append(
+                    elapsed
+                )
+
+            # -------------------------------------------------
+            # Overall progress
+            # -------------------------------------------------
+
+            overall_elapsed = (
+                time.perf_counter()
+                - total_start
+            )
+
+            percentage = (
+                current / total
+            ) * 100
+            report_progress(
+                "complete" if elapsed is not None else "error",
+                4,
+                4,
+                input_file,
+                f"Completed {current} of {total} slides",
+            )
+
+            print()
+            print(
+                f"Overall progress: "
+                f"{current}/{total} "
+                f"({percentage:.1f}%)"
+            )
+
+            print(
+                f"Total elapsed: "
+                f"{format_time(overall_elapsed)}"
+            )
 
     # =====================================================
     # Final statistics

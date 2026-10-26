@@ -120,8 +120,23 @@ RUN_START_PERF = None
 _SCAN_CACHE = {}
 
 
-def report_progress(stage, current, total, input_file=None, message="", metrics=None):
+def report_progress(
+    stage,
+    current,
+    total,
+    input_file=None,
+    message="",
+    metrics=None,
+    file_index=None,
+    files_total=None,
+):
     if PROGRESS_CALLBACK is not None:
+        file_index = (
+            file_index if file_index is not None else PROGRESS_FILE_INDEX
+        )
+        files_total = (
+            files_total if files_total is not None else PROGRESS_FILE_TOTAL
+        )
         PROGRESS_CALLBACK(
             {
                 "stage": stage,
@@ -130,12 +145,12 @@ def report_progress(stage, current, total, input_file=None, message="", metrics=
                 "total": total,
                 "file": str(input_file) if input_file is not None else "",
                 "message": message,
-                "file_index": PROGRESS_FILE_INDEX,
-                "files_total": PROGRESS_FILE_TOTAL,
+                "file_index": file_index,
+                "files_total": files_total,
                 "completed_files": (
-                    PROGRESS_FILE_INDEX
+                    file_index
                     if stage in {"complete", "error", "finished"}
-                    else max(0, PROGRESS_FILE_INDEX - 1)
+                    else max(0, file_index - 1)
                 ),
                 "metrics": copy.deepcopy(metrics or {}),
                 "run_elapsed_seconds": (
@@ -398,7 +413,8 @@ def convert_wsi(
     concurrent conversions do not clobber each other's results.
     """
 
-    global LAST_CONVERSION_METRICS
+    if _output is None:
+        global LAST_CONVERSION_METRICS, LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
     wsi_start = time.perf_counter()
     metrics = {
         "resolution": "",
@@ -528,6 +544,7 @@ def convert_wsi(
                 input_file,
                 "Already converted",
                 metrics,
+                file_index=current, files_total=total,
             )
             print()
             print("DeepZoom and thumbnail already exist. Skipping image load.")
@@ -550,6 +567,7 @@ def convert_wsi(
                 input_file,
                 "Source image loaded",
                 metrics,
+                file_index=current, files_total=total,
             )
             print(f"Image size: {image.width:,} x {image.height:,}")
             print(f"Load time: {format_time(load_elapsed)}")
@@ -563,7 +581,8 @@ def convert_wsi(
             metrics["deepzoom_status"] = "Skipped (already exists)"
 
             report_progress(
-                "deepzoom", 1, 4, input_file, "DeepZoom already exists", metrics
+                "deepzoom", 1, 4, input_file, "DeepZoom already exists", metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -578,7 +597,8 @@ def convert_wsi(
         else:
             metrics["deepzoom_status"] = "Converting"
             report_progress(
-                "deepzoom", 1, 4, input_file, "Converting to DeepZoom", metrics
+                "deepzoom", 1, 4, input_file, "Converting to DeepZoom", metrics,
+                file_index=current, files_total=total,
             )
 
             # ---------------------------------------------
@@ -627,6 +647,7 @@ def convert_wsi(
                 input_file,
                 "DeepZoom conversion complete",
                 metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -647,7 +668,8 @@ def convert_wsi(
         if thumb_exists:
             metrics["thumbnail_status"] = "Skipped (already exists)"
             report_progress(
-                "thumbnail", 2, 4, input_file, "Thumbnail already exists", metrics
+                "thumbnail", 2, 4, input_file, "Thumbnail already exists", metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -662,7 +684,8 @@ def convert_wsi(
         else:
             metrics["thumbnail_status"] = "Creating"
             report_progress(
-                "thumbnail", 2, 4, input_file, "Creating thumbnail", metrics
+                "thumbnail", 2, 4, input_file, "Creating thumbnail", metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -692,6 +715,7 @@ def convert_wsi(
                 input_file,
                 "Thumbnail creation complete",
                 metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -724,77 +748,83 @@ def convert_wsi(
             additional_outputs, start=1
         ):
             report_progress(
-                "copy",
-                2 + index / max(1, len(additional_outputs)),
-                4,
-                input_file,
-                f"Copying to destination {index} of {len(additional_outputs)}",
-                metrics,
+                "copy", 3, 4, input_file, "No additional destinations to copy",
+                file_index=current, files_total=total,
             )
-            secondary_exists = deepzoom_exists(destination_output)
-            secondary_thumbnail_exists = (
-                destination_folder / "thumbnail.jpg"
-            ).exists()
+        else:
+            def _copy_one(index, destination_folder, destination_output):
+                secondary_exists = deepzoom_exists(destination_output)
+                secondary_thumbnail_exists = (
+                    destination_folder / "thumbnail.jpg"
+                ).exists()
 
-            if secondary_exists and secondary_thumbnail_exists:
-                copy_results.append(
-                    {
+                if secondary_exists and secondary_thumbnail_exists:
+                    return index, {
                         "destination": str(destination_folder),
                         "status": "Skipped (already exists)",
                         "duration_seconds": 0,
-                    }
-                )
-                metrics["copy_destinations"] = copy_results
-                print(
-                    f"DeepZoom and thumbnail already exist at "
-                    f"{destination_folder}. Skipping copy."
-                )
-                continue
+                    }, 0, None
 
-            try:
-                destination_copy_elapsed = copy_deepzoom(
-                    primary_output, destination_output
-                )
-            except Exception as copy_error:
-                copy_results.append(
-                    {
+                try:
+                    destination_copy_elapsed = copy_deepzoom(
+                        primary_output, destination_output
+                    )
+                except Exception as copy_error:
+                    return index, {
                         "destination": str(destination_folder),
                         "status": f"Failed: {copy_error}",
                         "duration_seconds": 0,
-                    }
-                )
-                metrics["copy_destinations"] = copy_results
-                print(f"Copy to {destination_folder} failed: {copy_error}")
-                continue
+                    }, 0, copy_error
 
-            copy_elapsed += destination_copy_elapsed
-            copy_results.append(
-                {
+                return index, {
                     "destination": str(destination_folder),
                     "status": "Complete",
                     "duration_seconds": destination_copy_elapsed,
-                }
-            )
-            metrics["copy_seconds"] = copy_elapsed
-            metrics["copy_destinations"] = copy_results
-            report_progress(
-                "copy",
-                3,
-                4,
-                input_file,
-                f"Destination {index} copy complete",
-                metrics,
-            )
-            print()
-            print(
-                "DeepZoom copy complete: "
-                f"{deepzoom_storage_path(destination_output)}"
-            )
-            print(f"Copy time: {format_time(copy_elapsed)}")
-        if not additional_outputs:
-            report_progress(
-                "copy", 3, 4, input_file, "No additional destinations to copy"
-            )
+                }, destination_copy_elapsed, None
+
+            copy_threads = max(1, min(CONVERSION_THREADS, len(additional_outputs)))
+            with ThreadPoolExecutor(max_workers=copy_threads) as copy_executor:
+                copy_futures = [
+                    copy_executor.submit(
+                        _copy_one,
+                        index,
+                        destination_folder,
+                        destination_output,
+                    )
+                    for index, (destination_folder, destination_output) in enumerate(
+                        additional_outputs, start=1
+                    )
+                ]
+                for copy_future in copy_futures:
+                    index, result, elapsed, copy_error = copy_future.result()
+                    copy_results.append(result)
+                    copy_elapsed += elapsed
+                    metrics["copy_seconds"] = copy_elapsed
+                    metrics["copy_destinations"] = list(copy_results)
+                    status = result["status"]
+                    if status.startswith("Skipped"):
+                        print(
+                            f"DeepZoom and thumbnail already exist at "
+                            f"{result['destination']}. Skipping copy."
+                        )
+                    elif status.startswith("Failed"):
+                        print(f"Copy to {result['destination']} failed: {copy_error}")
+                    else:
+                        print()
+                        print(
+                            "DeepZoom copy complete: "
+                            f"{result['destination']}"
+                        )
+                        print(f"Copy time: {format_time(elapsed)}")
+                    report_progress(
+                        "copy",
+                        3,
+                        4,
+                        input_file,
+                        f"Destination {index} of {len(additional_outputs)} copy complete",
+                        metrics,
+                        file_index=current, files_total=total,
+                    )
 
         # =================================================
         # TOTAL TIME FOR THIS WSI
@@ -818,7 +848,8 @@ def convert_wsi(
             f"[{current}/{total}] COMPLETE"
         )
         report_progress(
-            "complete", 4, 4, input_file, "Slide complete", metrics
+            "complete", 4, 4, input_file, "Slide complete", metrics,
+            file_index=current, files_total=total,
         )
 
         print(
@@ -844,12 +875,14 @@ def convert_wsi(
         return wsi_elapsed
 
     except Exception as e:
-        global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
-        LAST_CONVERSION_ERROR = str(e)
-        LAST_CONVERSION_DURATION = time.perf_counter() - wsi_start
-        metrics["slide_seconds"] = LAST_CONVERSION_DURATION
-        metrics["error"] = LAST_CONVERSION_ERROR
-        report_progress("error", 4, 4, input_file, "Slide failed", metrics)
+        if _output is None:
+            global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
+            LAST_CONVERSION_ERROR = str(e)
+            LAST_CONVERSION_DURATION = time.perf_counter() - wsi_start
+        metrics["slide_seconds"] = time.perf_counter() - wsi_start
+        metrics["error"] = str(e)
+        report_progress("error", 4, 4, input_file, "Slide failed", metrics,
+                        file_index=current, files_total=total)
 
         wsi_elapsed = (
             time.perf_counter()

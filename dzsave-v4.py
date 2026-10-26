@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dzsave_v4_gui_common as common
 
@@ -82,6 +82,11 @@ ROBOCOPY_THREADS = 16
 ROBOCOPY_RETRIES = 2
 
 ROBOCOPY_WAIT = 1
+
+
+# ---------------------------------------------------------
+# Conversion threading
+# ---------------------------------------------------------
 
 CONVERSION_THREADS = 4
 
@@ -393,7 +398,7 @@ def convert_wsi(
     input_file: Path,
     current: int,
     total: int,
-    _output: dict | None = None,
+    _output=None,
 ):
     """
     Convert one WSI to DeepZoom once.
@@ -403,8 +408,9 @@ def convert_wsi(
     Then copies the DeepZoom and thumbnail
     to any additional destinations.
 
-    If _output is provided, conversion results are written into it
-    instead of module-level globals, making the call thread-safe.
+    When _output is a dict, the per-slide metrics are written into it
+    (instead of the module-level LAST_CONVERSION_METRICS) so that
+    concurrent conversions do not clobber each other's results.
     """
 
     if _output is None:
@@ -422,13 +428,10 @@ def convert_wsi(
         "copy_destinations": [],
     }
     if _output is not None:
-        _output["metrics"] = metrics
-    else:
-        LAST_CONVERSION_METRICS = metrics
-    report_progress(
-        "preparing", 0, 4, input_file, "Preparing slide", metrics,
-        file_index=current, files_total=total,
-    )
+        _output.clear()
+        _output.update(metrics)
+    LAST_CONVERSION_METRICS = metrics
+    report_progress("preparing", 0, 4, input_file, "Preparing slide", metrics)
 
     wsi_name = input_file.stem
 
@@ -740,7 +743,10 @@ def convert_wsi(
 
         copy_elapsed = 0
         copy_results = []
-        if not additional_outputs:
+
+        for index, (destination_folder, destination_output) in enumerate(
+            additional_outputs, start=1
+        ):
             report_progress(
                 "copy", 3, 4, input_file, "No additional destinations to copy",
                 file_index=current, files_total=total,
@@ -1065,24 +1071,53 @@ def main():
     # Process files
     # =====================================================
 
-    # Process files in parallel via ThreadPoolExecutor
-    conversion_threads = max(1, int(CONVERSION_THREADS))
+    def _process_one(current, input_file):
+        global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
+        global LAST_CONVERSION_ERROR, LAST_CONVERSION_DURATION, LAST_CONVERSION_METRICS
+        PROGRESS_FILE_INDEX = current
+        PROGRESS_FILE_TOTAL = total
+        report_progress(
+            "preparing",
+            0,
+            4,
+            input_file,
+            f"Starting slide {current} of {total}",
+        )
 
-    with ThreadPoolExecutor(max_workers=conversion_threads) as executor:
-        futures = []
-        for current, input_file in enumerate(wsi_files, start=1):
-            _output = {}
-            future = executor.submit(
-                convert_wsi, input_file, current, total, _output
+        LAST_CONVERSION_ERROR = None
+        LAST_CONVERSION_DURATION = None
+        LAST_CONVERSION_METRICS = {}
+        output = {}
+        elapsed = convert_wsi(
+            input_file,
+            current,
+            total,
+            _output=output,
+        )
+        return {
+            "current": current,
+            "input_file": input_file,
+            "elapsed": elapsed,
+            "output": output,
+            "error": LAST_CONVERSION_ERROR or "",
+            "duration": LAST_CONVERSION_DURATION,
+        }
+
+    with ThreadPoolExecutor(max_workers=CONVERSION_THREADS) as executor:
+        futures = [
+            executor.submit(
+                _process_one, current, input_file
             )
-            futures.append((current, input_file, _output, future))
-
-        finished = 0
-        for current, input_file, _output, future in futures:
-            elapsed = future.result()
-            finished += 1
-            metrics = _output.get("metrics", {})
-
+            for current, input_file in enumerate(wsi_files, start=1)
+        ]
+        for future in as_completed(futures):
+            item = future.result()
+            current = item["current"]
+            input_file = item["input_file"]
+            elapsed = item["elapsed"]
+            output = item["output"]
+            PROGRESS_FILE_INDEX = current
+            PROGRESS_FILE_TOTAL = total
             results.append(
                 {
                     "file": str(input_file),
@@ -1090,10 +1125,10 @@ def main():
                     "duration_seconds": (
                         elapsed
                         if elapsed is not None
-                        else metrics.get("slide_seconds", 0)
+                        else item["duration"]
                     ),
-                    "error": metrics.get("error", "") or "",
-                    **metrics,
+                    "error": item["error"],
+                    **output,
                 }
             )
 
@@ -1118,22 +1153,21 @@ def main():
                 - total_start
             )
 
-            percentage = (finished / total) * 100
+            percentage = (
+                current / total
+            ) * 100
             report_progress(
                 "complete" if elapsed is not None else "error",
                 4,
                 4,
                 input_file,
-                f"Completed {finished} of {total} slides",
-                metrics,
-                file_index=finished,
-                files_total=total,
+                f"Completed {current} of {total} slides",
             )
 
             print()
             print(
                 f"Overall progress: "
-                f"{finished}/{total} "
+                f"{current}/{total} "
                 f"({percentage:.1f}%)"
             )
 

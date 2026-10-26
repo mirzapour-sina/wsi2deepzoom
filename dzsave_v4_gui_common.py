@@ -144,9 +144,7 @@ def validate_settings(values, selected_files=None, destinations=None):
             "robocopy_threads": int(values["robocopy_threads"]),
             "robocopy_retries": int(values["robocopy_retries"]),
             "robocopy_wait": int(values["robocopy_wait"]),
-            "conversion_threads": int(
-                values.get("conversion_threads", DEFAULTS["conversion_threads"])
-            ),
+            "conversion_threads": int(values.get("conversion_threads", DEFAULTS["conversion_threads"])),
         }
     except (TypeError, ValueError) as error:
         raise ValueError("All numeric conversion settings must be whole numbers.") from error

@@ -3,6 +3,7 @@ import queue
 import sys
 import threading
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
@@ -14,6 +15,16 @@ import dzsave_v4_gui_common as common
 
 
 class DzSaveController(QObject):
+    _NUMERIC_RULES = {
+        "jpeg_quality": (1, 100, "JPEG quality must be between 1 and 100."),
+        "thumbnail_size": (1, None, "Thumbnail size must be at least 1 pixel."),
+        "thumbnail_quality": (1, 100, "Thumbnail quality must be between 1 and 100."),
+        "robocopy_threads": (1, 128, "Copy threads must be between 1 and 128."),
+        "robocopy_retries": (0, None, "Copy retries cannot be negative."),
+        "robocopy_wait": (0, None, "Retry wait cannot be negative."),
+        "conversion_threads": (1, 128, "Conversion threads must be between 1 and 128."),
+    }
+
     fieldsChanged = Signal()
     destinationsChanged = Signal()
     filesChanged = Signal()
@@ -27,6 +38,8 @@ class DzSaveController(QObject):
     activityChanged = Signal()
     resultsChanged = Signal()
     runSummaryChanged = Signal()
+    fieldErrorsChanged = Signal()
+    darkModeChanged = Signal()
 
     def __init__(self):
         super().__init__()
@@ -58,6 +71,8 @@ class DzSaveController(QObject):
         self._results = []
         self._run_summary = "Started: — | Finished: — | Average per file: —"
         self._busy = False
+        self._field_errors = {}
+        self._dark_mode = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)
         self._timer.start(100)
@@ -213,6 +228,21 @@ class DzSaveController(QObject):
     def runSummary(self):
         return self._run_summary
 
+    @Property("QVariantMap", notify=fieldErrorsChanged)
+    def fieldErrors(self):
+        return dict(self._field_errors)
+
+    @Property(bool, notify=darkModeChanged)
+    def darkMode(self):
+        return self._dark_mode
+
+    @Slot(bool)
+    def setDarkMode(self, dark):
+        if self._dark_mode == dark:
+            return
+        self._dark_mode = dark
+        self.darkModeChanged.emit()
+
     @Slot()
     def openReport(self):
         try:
@@ -289,6 +319,60 @@ class DzSaveController(QObject):
         self.activityChanged.emit()
         self._append_log("Starting conversion...\n")
         common.run_conversion(settings, self.events)
+
+    @Slot()
+    def requestCancel(self):
+        common.request_cancel()
+        self._status = "Cancellation requested. Stopping after current file..."
+        self.statusChanged.emit()
+
+    @Slot()
+    def resetDefaults(self):
+        if self._busy:
+            return
+        self._fields = dict(common.DEFAULTS)
+        self.fieldsChanged.emit()
+        self._destinations = list(common.DEFAULT_DESTINATIONS)
+        self.destinationsChanged.emit()
+        self._field_errors = {}
+        self.fieldErrorsChanged.emit()
+        self._status = "Settings reset to defaults."
+        self.statusChanged.emit()
+
+    @Slot(str, str, result=str)
+    def validateField(self, key, value):
+        """Validate a single field and store its inline error; returns the error message."""
+        error = self._check_field(key, value)
+        self._field_errors[key] = error or ""
+        self.fieldErrorsChanged.emit()
+        return error or ""
+
+    def _check_field(self, key, value):
+        """Return an inline error message for a field value, or None when valid."""
+        if key == "input_dir":
+            if not Path(value).expanduser().is_dir():
+                return "Select an existing input folder."
+            return None
+        if key == "wsi_extensions":
+            try:
+                common.parse_wsi_extensions(value)
+            except ValueError as error:
+                return str(error)
+            return None
+        if key in self._NUMERIC_RULES:
+            minimum, maximum, message = self._NUMERIC_RULES[key]
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return "Enter a whole number."
+            if number < minimum or (maximum is not None and number > maximum):
+                return message
+            return None
+        if key.startswith("destination_"):
+            if not value.strip():
+                return "Enter a destination folder."
+            return None
+        return None
 
     @Slot()
     def _poll_events(self):
@@ -458,6 +542,15 @@ def main():
     qml_modules = common.APP_DIR / "PySide6" / "qml"
     if qml_modules.is_dir():
         engine.addImportPath(str(qml_modules))
+    # Also add the installed PySide6 QML modules directory as a fallback
+    try:
+        import PySide6
+
+        pyside_qml = Path(PySide6.__file__).parent / "qml"
+        if pyside_qml.is_dir():
+            engine.addImportPath(str(pyside_qml))
+    except ImportError:
+        pass
     engine.load(QUrl.fromLocalFile(str(qml_file)))
     if not engine.rootObjects():
         raise RuntimeError(f"Could not load QML interface: {qml_file}")

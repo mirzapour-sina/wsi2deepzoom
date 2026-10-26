@@ -37,7 +37,7 @@ CONVERTER_PATH = APP_DIR / "dzsave-v4.py"
 _VIPS_DLL_HANDLES = []
 _VIPS_DLL_PATHS = set()
 DEFAULTS = {
-    "input_dir": r"D:\Edupat\Urmia-Medical-University\WSI",
+    "input_dir": "",
     "wsi_extensions": ".tif, .tiff, .svs, .ndpi, .mrxs, .scn, .vms, .vmu, .bif, .svslide, .vsi, .isyntax, .qptiff, .ome.tif, .ome.tiff",
     "deepzoom_format": "dzi",
     "jpeg_quality": "85",
@@ -48,7 +48,7 @@ DEFAULTS = {
     "robocopy_wait": "1",
     "conversion_threads": "4",
 }
-DEFAULT_DESTINATIONS = [r"D:\Edupat\Deepzoom"]
+DEFAULT_DESTINATIONS = [""]
 DEEPZOOM_FORMATS = {
     "dzi": {"label": "DZI (descriptor + tile folder)", "layout": "dz"},
     "szi": {"label": "SZI archive", "layout": "dz"},

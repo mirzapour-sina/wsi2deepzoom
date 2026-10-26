@@ -2,17 +2,63 @@ import queue
 import sys
 import threading
 import time
+from pathlib import Path
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import dzsave_v4_gui_common as common
 
 
+class ToolTip:
+    """Small hover tooltip for widgets that lack a native tooltip."""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, _event=None):
+        if self.tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 22
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw,
+            text=self.text,
+            background="#ffffe0",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("Segoe UI", 9),
+        )
+        label.pack(ipadx=1)
+
+    def _hide(self, _event=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 class DzSaveWindow:
+    _NUMERIC_RULES = {
+        "jpeg_quality": (1, 100, "JPEG quality must be between 1 and 100."),
+        "thumbnail_size": (1, None, "Thumbnail size must be at least 1 pixel."),
+        "thumbnail_quality": (1, 100, "Thumbnail quality must be between 1 and 100."),
+        "robocopy_threads": (1, 128, "Copy threads must be between 1 and 128."),
+        "robocopy_retries": (0, None, "Copy retries cannot be negative."),
+        "robocopy_wait": (0, None, "Retry wait cannot be negative."),
+    }
+
     def __init__(self, root):
         self.root = root
         self.events = queue.Queue()
         self.busy = False
+        self.dark_mode = False
         self.run_started_monotonic = None
         self.run_started_at = "—"
         self.scanned_files = []
@@ -23,6 +69,8 @@ class DzSaveWindow:
             key: tk.StringVar(value=value)
             for key, value in common.DEFAULTS.items()
         }
+        self.field_entries = {}
+        self.field_errors = {}
 
         root.title("WSI DeepZoom Converter - Tkinter")
         root.geometry("1000x980")
@@ -30,6 +78,47 @@ class DzSaveWindow:
 
         self._build()
         root.after(100, self._poll_events)
+        root.bind("<Escape>", self._on_escape)
+        root.bind("<F5>", self._on_f5)
+        root.bind("<Control-r>", self._on_reset_shortcut)
+        self._add_tooltips()
+
+    def _check_field(self, key, value):
+        """Return an inline error message for a field value, or None when valid."""
+        if key == "input_dir":
+            if not Path(value).expanduser().is_dir():
+                return "Select an existing input folder."
+            return None
+        if key == "wsi_extensions":
+            try:
+                common.parse_wsi_extensions(value)
+            except ValueError as error:
+                return str(error)
+            return None
+        if key in self._NUMERIC_RULES:
+            minimum, maximum, message = self._NUMERIC_RULES[key]
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return "Enter a whole number."
+            if number < minimum or (maximum is not None and number > maximum):
+                return message
+            return None
+        return None
+
+    def _validate_field(self, key):
+        """Show or clear the inline error label for a single field."""
+        entry = self.field_entries.get(key)
+        error_label = self.field_errors.get(key)
+        if entry is None or error_label is None:
+            return True
+        value = self.values[key].get()
+        error = self._check_field(key, value)
+        if error:
+            error_label.config(text=error)
+        else:
+            error_label.config(text="")
+        return error is None
 
     def _build(self):
         page = ttk.Frame(self.root)
@@ -111,15 +200,20 @@ class DzSaveWindow:
             ("jpeg_quality", "DeepZoom JPEG quality"),
             ("thumbnail_size", "Thumbnail max size (px)"),
             ("thumbnail_quality", "Thumbnail JPEG quality"),
+            ("conversion_threads", "Conversion threads"),
         )
         for column, (key, label) in enumerate(setting_labels):
             settings.columnconfigure(column, weight=1)
             cell = ttk.Frame(settings)
             cell.grid(row=0, column=column, sticky="ew", padx=4)
             ttk.Label(cell, text=label).pack(anchor="w")
-            ttk.Entry(cell, textvariable=self.values[key], width=10).pack(
-                fill=tk.X, pady=(4, 0)
-            )
+            entry = ttk.Entry(cell, textvariable=self.values[key], width=10)
+            entry.pack(fill=tk.X, pady=(4, 0))
+            entry.bind("<FocusOut>", lambda _event, k=key: self._validate_field(k))
+            self.field_entries[key] = entry
+            error = tk.Label(cell, text="", foreground="#c53030", font=("Segoe UI", 8))
+            error.pack(anchor="w", pady=(1, 0))
+            self.field_errors[key] = error
         ttk.Label(settings, text="DeepZoom output format").grid(
             row=1, column=0, sticky="w", padx=4, pady=(10, 0)
         )
@@ -132,13 +226,17 @@ class DzSaveWindow:
         ttk.Label(settings, text="WSI file extensions (comma-separated)").grid(
             row=1, column=1, columnspan=2, sticky="w", padx=4, pady=(10, 0)
         )
-        ttk.Entry(settings, textvariable=self.values["wsi_extensions"]).grid(
-            row=2, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0)
-        )
+        entry = ttk.Entry(settings, textvariable=self.values["wsi_extensions"])
+        entry.grid(row=2, column=1, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
+        entry.bind("<FocusOut>", lambda _event: self._validate_field("wsi_extensions"))
+        self.field_entries["wsi_extensions"] = entry
+        error = tk.Label(settings, text="", foreground="#c53030", font=("Segoe UI", 8))
+        error.grid(row=3, column=1, columnspan=2, sticky="w", pady=(1, 0))
+        self.field_errors["wsi_extensions"] = error
         ttk.Label(
             settings,
             text="Extensions must be supported by your installed libvips loaders.",
-        ).grid(row=3, column=1, columnspan=2, sticky="w", padx=4, pady=(2, 0))
+        ).grid(row=4, column=1, columnspan=2, sticky="w", padx=4, pady=(2, 0))
 
         copy_settings = ttk.LabelFrame(options, padding=10)
         self.copy_settings_frame = copy_settings
@@ -164,9 +262,13 @@ class DzSaveWindow:
             cell = ttk.Frame(copy_settings)
             cell.grid(row=0, column=column, sticky="ew", padx=4)
             ttk.Label(cell, text=label).pack(anchor="w")
-            ttk.Entry(cell, textvariable=self.values[key], width=10).pack(
-                fill=tk.X, pady=(4, 0)
-            )
+            entry = ttk.Entry(cell, textvariable=self.values[key], width=10)
+            entry.pack(fill=tk.X, pady=(4, 0))
+            entry.bind("<FocusOut>", lambda _event, k=key: self._validate_field(k))
+            self.field_entries[key] = entry
+            error = tk.Label(cell, text="", foreground="#c53030", font=("Segoe UI", 8))
+            error.pack(anchor="w", pady=(1, 0))
+            self.field_errors[key] = error
 
         selection = ttk.LabelFrame(
             main,
@@ -362,7 +464,7 @@ class DzSaveWindow:
         self.progress_frame = progress_frame
         progress_frame.grid(row=8, column=0, sticky="ew", pady=(10, 0))
         progress_frame.columnconfigure(0, weight=1)
-        self.progress_status = tk.StringVar(value="Ready")
+        self.progress_status = tk.StringVar(value="Overall — Ready")
         ttk.Label(progress_frame, textvariable=self.progress_status).grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
@@ -387,18 +489,47 @@ class DzSaveWindow:
         buttons.grid(row=9, column=0, sticky="e", pady=(10, 0))
         self.scan_button = ttk.Button(buttons, text="Scan files", command=self.scan)
         self.scan_button.pack(side=tk.LEFT, padx=(0, 8))
-        self.start_button = ttk.Button(
-            buttons, text="Start conversion", command=self.start_conversion
+        self.start_button = tk.Button(
+            buttons,
+            text="Start conversion",
+            command=self.start_conversion,
+            bg="#2563eb",
+            fg="white",
+            activebackground="#1d4ed8",
+            activeforeground="white",
+            disabledforeground="#9ca3af",
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.RAISED,
+            bd=1,
+            padx=16,
+            pady=3,
+            cursor="hand2",
         )
         self.start_button.pack(side=tk.LEFT)
+        self.cancel_button = ttk.Button(
+            buttons, text="Cancel", command=self._request_cancel, state=tk.DISABLED
+        )
+        self.cancel_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.reset_button = ttk.Button(
+            buttons, text="Reset to defaults", command=self._reset_defaults
+        )
+        self.reset_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.dark_toggle = ttk.Button(
+            buttons, text="Dark mode", command=self._toggle_dark_mode
+        )
+        self.dark_toggle.pack(side=tk.LEFT, padx=(8, 0))
 
     def _path_row(self, parent, row, key, label):
         ttk.Label(parent, text=label).grid(
             row=row, column=0, sticky="w", padx=(0, 10), pady=4
         )
-        ttk.Entry(parent, textvariable=self.values[key]).grid(
-            row=row, column=1, sticky="ew", pady=4
-        )
+        entry = ttk.Entry(parent, textvariable=self.values[key])
+        entry.grid(row=row, column=1, sticky="ew", pady=4)
+        entry.bind("<FocusOut>", lambda _event, k=key: self._validate_field(k))
+        self.field_entries[key] = entry
+        error = tk.Label(parent, text="", foreground="#c53030", font=("Segoe UI", 8))
+        error.grid(row=row + 1, column=1, columnspan=2, sticky="w", pady=(1, 0))
+        self.field_errors[key] = error
         ttk.Button(
             parent,
             text="Browse...",
@@ -465,6 +596,89 @@ class DzSaveWindow:
         self.scan_button.configure(state=state)
         self.start_button.configure(state=state)
         self.file_list.configure(state=state)
+        self.cancel_button.configure(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _request_cancel(self):
+        common.request_cancel()
+        self.status.set("Cancellation requested. Stopping after current file...")
+
+    def _reset_defaults(self):
+        if self.busy:
+            return
+        for key, variable in self.values.items():
+            variable.set(common.DEFAULTS.get(key, ""))
+        self.destinations = [
+            tk.StringVar(value=path) for path in common.DEFAULT_DESTINATIONS
+        ]
+        self._render_destinations()
+        for key, error in self.field_errors.items():
+            error.config(text="")
+        self.status.set("Settings reset to defaults.")
+
+    def _toggle_dark_mode(self):
+        self.dark_mode = not self.dark_mode
+        self.dark_toggle.configure(text="Light mode" if self.dark_mode else "Dark mode")
+        self._apply_dark_mode(self.dark_mode)
+
+    def _apply_dark_mode(self, dark):
+        if dark:
+            bg, fg = "#2b2b2b", "#e5e7eb"
+            entry_bg, entry_fg = "#3a3a3a", "#e5e7eb"
+            select_bg = "#3a7ca5"
+            trough = "#2b2b2b"
+        else:
+            bg, fg = "#f5f7fa", "#111827"
+            entry_bg, entry_fg = "#ffffff", "#111827"
+            select_bg = "#cce8ff"
+            trough = "#f5f7fa"
+
+        style = ttk.Style(self.root)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TLabelFrame", background=bg, foreground=fg)
+        style.configure("TEntry", fieldbackground=entry_bg, foreground=entry_fg)
+        style.configure("TButton", background=entry_bg, foreground=fg)
+        style.configure("TCombobox", fieldbackground=entry_bg, foreground=fg)
+        style.configure("TProgressbar", background=select_bg, troughcolor=trough)
+        style.map(
+            "TButton",
+            background=[("active", "#4a4a4a" if dark else "#e5e7eb")],
+        )
+
+        self.root.configure(bg=bg)
+        self.page_canvas.configure(bg=bg, highlightbackground=bg)
+        self.page_content.configure(style="TFrame")
+        self.log.configure(bg=entry_bg, fg=entry_fg, insertbackground=fg)
+        self.file_list.configure(
+            bg=entry_bg, fg=entry_fg, selectbackground=select_bg
+        )
+        for error in self.field_errors.values():
+            error.configure(bg=bg)
+
+    def _on_escape(self, _event):
+        if self.cancel_button.instate(["!disabled"]):
+            self._request_cancel()
+        return "break"
+
+    def _on_f5(self, _event):
+        if self.start_button.instate(["!disabled"]):
+            self.start_conversion()
+        return "break"
+
+    def _on_reset_shortcut(self, _event):
+        if self.reset_button.instate(["!disabled"]):
+            self._reset_defaults()
+        return "break"
+
+    def _add_tooltips(self):
+        ToolTip(self.scan_button, "Scan the source folder for WSI files.")
+        ToolTip(self.start_button, "Start conversion of the selected WSI files (F5).")
+        ToolTip(self.cancel_button, "Cancel the running conversion after the current file (Escape).")
+        ToolTip(self.reset_button, "Reset all settings to their default values (Ctrl+R).")
+        ToolTip(self.open_report_button, "Open the generated conversion report.")
+        ToolTip(self.log_toggle, "Show or hide the detailed text output.")
+        ToolTip(self.details_toggle, "Show or hide live conversion details.")
+        ToolTip(self.results_toggle, "Show or hide per-file conversion results.")
 
     def _append_log(self, text):
         self.log.configure(state=tk.NORMAL)
@@ -518,7 +732,7 @@ class DzSaveWindow:
         self.stage_progress.configure(value=0)
         self.overall_percentage.set("0%")
         self.stage_percentage.set("0%")
-        self.progress_status.set("Starting conversion")
+        self.progress_status.set("Overall — Starting conversion")
         self.status.set("Conversion running...")
         self.report_info.set("Creating conversion log and Markdown report...")
         self.open_report_button.configure(state=tk.DISABLED)
@@ -568,7 +782,7 @@ class DzSaveWindow:
                     f"{round(payload['stage_value'] / 4 * 100)}%"
                 )
                 self.progress_status.set(
-                    f"{payload['message']} — "
+                    f"Overall — {payload['message']} — "
                     f"{payload['completed_files']} of {payload['files_total']} files complete"
                 )
                 self.status.set(payload["message"])

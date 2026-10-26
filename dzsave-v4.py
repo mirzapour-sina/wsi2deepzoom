@@ -118,6 +118,22 @@ LAST_CONVERSION_DURATION = None
 LAST_CONVERSION_METRICS = {}
 RUN_START_PERF = None
 _SCAN_CACHE = {}
+CANCEL_REQUESTED = threading.Event()
+
+
+def request_cancel():
+    """Signal an in-progress conversion to stop after the current file."""
+    CANCEL_REQUESTED.set()
+
+
+def is_cancelled():
+    """Return True if cancellation has been requested."""
+    return CANCEL_REQUESTED.is_set()
+
+
+def reset_cancel():
+    """Clear the cancel flag before starting a new conversion."""
+    CANCEL_REQUESTED.clear()
 
 
 def report_progress(stage, current, total, input_file=None, message="", metrics=None):
@@ -508,6 +524,12 @@ def convert_wsi(
         conversion_elapsed = 0
         thumbnail_elapsed = 0
 
+        # -----------------------------------------------------
+        # Cancel check before doing any work
+        # -----------------------------------------------------
+        if is_cancelled():
+            return None
+
         # =================================================
         # Check what already exists
         # =================================================
@@ -639,6 +661,12 @@ def convert_wsi(
                 f"{format_time(conversion_elapsed)}"
             )
 
+            # -------------------------------------------------
+            # Cancel check after DeepZoom conversion
+            # -------------------------------------------------
+            if is_cancelled():
+                return None
+
         # =================================================
         # STEP 2
         # Create thumbnail
@@ -704,6 +732,12 @@ def convert_wsi(
                 f"{format_time(thumbnail_elapsed)}"
             )
 
+            # -------------------------------------------------
+            # Cancel check after thumbnail creation
+            # -------------------------------------------------
+            if is_cancelled():
+                return None
+
         # -------------------------------------------------
         # Release image
         # -------------------------------------------------
@@ -723,6 +757,11 @@ def convert_wsi(
         for index, (destination_folder, destination_output) in enumerate(
             additional_outputs, start=1
         ):
+            # -------------------------------------------------
+            # Cancel check before each copy destination
+            # -------------------------------------------------
+            if is_cancelled():
+                return None
             report_progress(
                 "copy",
                 2 + index / max(1, len(additional_outputs)),
@@ -890,6 +929,8 @@ def main():
     global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
     global LAST_CONVERSION_METRICS, RUN_START_PERF
     global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
+
+    reset_cancel()
 
     # -----------------------------------------------------
     # Validate configuration before doing any work
@@ -1077,7 +1118,17 @@ def main():
             )
             for current, input_file in enumerate(wsi_files, start=1)
         ]
+        pending = set(futures)
         for future in as_completed(futures):
+            if is_cancelled():
+                future.cancel()
+                for remaining in pending:
+                    remaining.cancel()
+                report_progress(
+                    "finished", 4, 4, message="Conversion cancelled by user"
+                )
+                break
+            pending.discard(future)
             item = future.result()
             current = item["current"]
             input_file = item["input_file"]

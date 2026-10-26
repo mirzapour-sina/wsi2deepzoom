@@ -30,19 +30,20 @@ ApplicationWindow {
         contentItem: Text {
             text: control.text
             font: control.font
-            color: control.primary ? "white" : "#18324b"
+            color: control.primary ? "white" : (controller.darkMode ? "#e5e7eb" : "#18324b")
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
         }
         background: Rectangle {
             radius: 5
-            color: !control.enabled ? "#e5e7eb"
-                  : control.down ? (control.primary ? "#1e40af" : "#c8dcf2")
-                  : control.hovered ? (control.primary ? "#1d4ed8" : "#dce9f7")
-                  : control.primary ? "#2563eb" : "#edf3fa"
+            color: !control.enabled ? (controller.darkMode ? "#3a3a3a" : "#e5e7eb")
+                  : control.down ? (control.primary ? "#1e40af" : (controller.darkMode ? "#4a4a4a" : "#c8dcf2"))
+                  : control.hovered ? (control.primary ? "#1d4ed8" : (controller.darkMode ? "#4a4a4a" : "#dce9f7"))
+                  : control.primary ? "#2563eb" : (controller.darkMode ? "#3a3a3a" : "#edf3fa")
             border.color: control.activeFocus ? "#0f172a"
-                         : control.primary ? "#1e40af" : "#7895b2"
+                         : control.primary ? "#1e40af"
+                         : (controller.darkMode ? "#555" : "#7895b2")
             border.width: control.activeFocus ? 2 : 1
         }
     }
@@ -58,19 +59,20 @@ ApplicationWindow {
         contentItem: Text {
             text: (control.checked ? "▼  " : "▶  ") + control.text
             font: control.font
-            color: "#18324b"
+            color: controller.darkMode ? "#e5e7eb" : "#18324b"
             horizontalAlignment: Text.AlignLeft
             verticalAlignment: Text.AlignVCenter
         }
         background: Rectangle {
             radius: 6
-            color: !control.enabled ? "#f3f4f6"
-                  : control.down ? "#c6d9ed"
-                  : control.checked ? "#e2ecf7"
-                  : control.hovered ? "#f3f7fc" : "#edf3fa"
+            color: !control.enabled ? (controller.darkMode ? "#3a3a3a" : "#f3f4f6")
+                  : control.down ? (controller.darkMode ? "#4a4a4a" : "#c6d9ed")
+                  : control.checked ? (controller.darkMode ? "#4a4a4a" : "#e2ecf7")
+                  : control.hovered ? (controller.darkMode ? "#4a4a4a" : "#f3f7fc") : (controller.darkMode ? "#3a3a3a" : "#edf3fa")
             border.color: control.activeFocus ? "#2563eb"
-                         : control.checked ? "#587da3"
-                         : control.hovered ? "#7895b2" : "#a9bbcd"
+                         : control.checked ? (controller.darkMode ? "#555" : "#587da3")
+                         : control.hovered ? (controller.darkMode ? "#555" : "#7895b2")
+                         : (controller.darkMode ? "#555" : "#a9bbcd")
             border.width: control.activeFocus ? 2 : 1
         }
     }
@@ -114,12 +116,20 @@ ApplicationWindow {
                     TextField {
                         text: controller.fields["input_dir"]
                         onTextEdited: controller.setField("input_dir", text)
+                        onEditingFinished: controller.validateField("input_dir", text)
                         Layout.fillWidth: true
                     }
                     ActionButton {
                         text: "Browse..."
+                ToolTip.text: "Browse for a folder."
                         onClicked: controller.browse("input_dir")
                     }
+                }
+                Label {
+                    text: controller.fieldErrors["input_dir"]
+                    color: "#c53030"
+                    font.pixelSize: 8
+                    Layout.fillWidth: true
                 }
 
                 Repeater {
@@ -135,15 +145,26 @@ ApplicationWindow {
                         }
                         TextField {
                             text: modelData
-                            onEditingFinished: controller.setDestination(index, text)
+                            onEditingFinished: {
+                                controller.setDestination(index, text)
+                                controller.validateField("destination_" + index, text)
+                            }
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: controller.fieldErrors["destination_" + index]
+                            color: "#c53030"
+                            font.pixelSize: 8
                             Layout.fillWidth: true
                         }
                         ActionButton {
                             text: "Browse..."
+                ToolTip.text: "Browse for a folder."
                             onClicked: controller.browseDestination(index)
                         }
                         ActionButton {
                             text: "Remove"
+                            ToolTip.text: "Remove this destination."
                             enabled: index > 0 && controller.destinations.length > 1
                             onClicked: controller.removeDestination(index)
                         }
@@ -151,6 +172,7 @@ ApplicationWindow {
                 }
                 ActionButton {
                     text: "Add destination"
+                    ToolTip.text: "Add another output destination."
                     onClicked: controller.addDestination()
                     Layout.alignment: Qt.AlignRight
                 }
@@ -186,11 +208,13 @@ ApplicationWindow {
                 RowLayout {
                     ActionButton {
                         text: "Select all"
+                        ToolTip.text: "Select all WSI files."
                         enabled: !controller.isBusy
                         onClicked: controller.selectAllFiles(true)
                     }
                     ActionButton {
                         text: "Select none"
+                        ToolTip.text: "Select no WSI files."
                         enabled: !controller.isBusy
                         onClicked: controller.selectAllFiles(false)
                     }
@@ -237,16 +261,49 @@ ApplicationWindow {
                         TextField {
                             text: controller.fields["jpeg_quality"]
                             onTextEdited: controller.setField("jpeg_quality", text)
+                            onEditingFinished: controller.validateField("jpeg_quality", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["jpeg_quality"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                         Label { text: "Thumbnail max size (pixels)" }
                         TextField {
                             text: controller.fields["thumbnail_size"]
                             onTextEdited: controller.setField("thumbnail_size", text)
+                            onEditingFinished: controller.validateField("thumbnail_size", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["thumbnail_size"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                         Label { text: "Thumbnail JPEG quality" }
                         TextField {
                             text: controller.fields["thumbnail_quality"]
                             onTextEdited: controller.setField("thumbnail_quality", text)
+                            onEditingFinished: controller.validateField("thumbnail_quality", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["thumbnail_quality"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
+                        }
+                        Label { text: "Conversion threads" }
+                        TextField {
+                            text: controller.fields["conversion_threads"]
+                            onTextEdited: controller.setField("conversion_threads", text)
+                            onEditingFinished: controller.validateField("conversion_threads", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["conversion_threads"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                         Label { text: "DeepZoom output format" }
                         ComboBox {
@@ -265,7 +322,14 @@ ApplicationWindow {
                         TextField {
                             text: controller.fields["wsi_extensions"]
                             onTextEdited: controller.setField("wsi_extensions", text)
+                            onEditingFinished: controller.validateField("wsi_extensions", text)
                             Layout.fillWidth: true
+                        }
+                        Label {
+                            text: controller.fieldErrors["wsi_extensions"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                         Label {
                             text: "Extensions must be supported by installed libvips loaders."
@@ -301,16 +365,37 @@ ApplicationWindow {
                         TextField {
                             text: controller.fields["robocopy_threads"]
                             onTextEdited: controller.setField("robocopy_threads", text)
+                            onEditingFinished: controller.validateField("robocopy_threads", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["robocopy_threads"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                         Label { text: "Retry count" }
                         TextField {
                             text: controller.fields["robocopy_retries"]
                             onTextEdited: controller.setField("robocopy_retries", text)
+                            onEditingFinished: controller.validateField("robocopy_retries", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["robocopy_retries"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                         Label { text: "Retry wait (seconds)" }
                         TextField {
                             text: controller.fields["robocopy_wait"]
                             onTextEdited: controller.setField("robocopy_wait", text)
+                            onEditingFinished: controller.validateField("robocopy_wait", text)
+                        }
+                        Label {
+                            text: controller.fieldErrors["robocopy_wait"]
+                            color: "#c53030"
+                            font.pixelSize: 8
+                            Layout.columnSpan: 2
                         }
                     }
                 }
@@ -553,15 +638,48 @@ ApplicationWindow {
             Item { Layout.fillWidth: true }
             ActionButton {
                 text: "Scan files"
+                ToolTip.text: "Scan the source folder for WSI files."
                 enabled: !controller.isBusy
                 onClicked: controller.scan()
             }
             ActionButton {
                 text: "Start conversion"
                 primary: true
+                ToolTip.text: "Start conversion of the selected WSI files (F5)."
                 enabled: !controller.isBusy
                 onClicked: controller.startConversion()
             }
+            ActionButton {
+                text: "Cancel"
+                ToolTip.text: "Cancel the running conversion after the current file (Escape)."
+                enabled: controller.isBusy
+                onClicked: controller.requestCancel()
+            }
+            ActionButton {
+                text: "Reset to defaults"
+                ToolTip.text: "Reset all settings to their default values (Ctrl+R)."
+                enabled: !controller.isBusy
+                onClicked: controller.resetDefaults()
+            }
+            ActionButton {
+                text: controller.darkMode ? "Light mode" : "Dark mode"
+                ToolTip.text: "Toggle dark mode."
+                enabled: !controller.isBusy
+                onClicked: controller.setDarkMode(!controller.darkMode)
+            }
+        }
+
+        Shortcut {
+            sequence: "Escape"
+            onActivated: if (controller.isBusy) controller.requestCancel()
+        }
+        Shortcut {
+            sequence: "F5"
+            onActivated: if (!controller.isBusy) controller.startConversion()
+        }
+        Shortcut {
+            sequence: "Ctrl+R"
+            onActivated: if (!controller.isBusy) controller.resetDefaults()
         }
     }
 }

@@ -2,8 +2,10 @@ import queue
 import sys
 import threading
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -50,10 +52,22 @@ def add_collapsible_section(layout, title, widget, expanded=False):
 
 
 class DzSaveWindow(QMainWindow):
+    _NUMERIC_RULES = {
+        "jpeg_quality": (1, 100, "JPEG quality must be between 1 and 100."),
+        "thumbnail_size": (1, None, "Thumbnail size must be at least 1 pixel."),
+        "thumbnail_quality": (1, 100, "Thumbnail quality must be between 1 and 100."),
+        "robocopy_threads": (1, 128, "Copy threads must be between 1 and 128."),
+        "robocopy_retries": (0, None, "Copy retries cannot be negative."),
+        "robocopy_wait": (0, None, "Retry wait cannot be negative."),
+        "conversion_threads": (1, 128, "Conversion threads must be between 1 and 128."),
+    }
+
     def __init__(self):
         super().__init__()
         self.events = queue.Queue()
         self.busy = False
+        self.dark_mode = False
+        self.run_started_monotonic = None
         self.scanned_files = []
         self.destination_values = list(common.DEFAULT_DESTINATIONS)
         self.destination_fields = []
@@ -62,6 +76,7 @@ class DzSaveWindow(QMainWindow):
             for key, value in common.DEFAULTS.items()
             if key != "deepzoom_format"
         }
+        self.field_errors = {}
         self.deepzoom_format = QComboBox()
         for value, option in common.DEEPZOOM_FORMATS.items():
             self.deepzoom_format.addItem(option["label"], value)
@@ -73,6 +88,72 @@ class DzSaveWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_events)
         self.timer.start(100)
+        self._add_shortcuts()
+        self._add_tooltips()
+
+    def _check_field(self, key, value):
+        """Return an inline error message for a field value, or None when valid."""
+        if key == "input_dir":
+            if not Path(value).expanduser().is_dir():
+                return "Select an existing input folder."
+            return None
+        if key == "wsi_extensions":
+            try:
+                common.parse_wsi_extensions(value)
+            except ValueError as error:
+                return str(error)
+            return None
+        if key in self._NUMERIC_RULES:
+            minimum, maximum, message = self._NUMERIC_RULES[key]
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return "Enter a whole number."
+            if number < minimum or (maximum is not None and number > maximum):
+                return message
+            return None
+        return None
+
+    def _validate_field(self, key):
+        """Show or clear the inline error label for a single field."""
+        field = self.fields.get(key)
+        error_label = self.field_errors.get(key)
+        if field is None or error_label is None:
+            return True
+        value = field.text()
+        error = self._check_field(key, value)
+        if error:
+            field.setStyleSheet("border: 1px solid #c53030;")
+            error_label.setText(error)
+        else:
+            field.setStyleSheet("")
+            error_label.setText("")
+        return error is None
+
+    def _validate_all_fields(self):
+        """Validate every editable field and return True when all are valid."""
+        valid = True
+        for key in self.fields:
+            if not self._validate_field(key):
+                valid = False
+        return valid
+
+    def _validated_field(self, key):
+        """Return a container pairing self.fields[key] with an inline error label."""
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(2)
+        container_layout.addWidget(self.fields[key])
+        error = QLabel("")
+        error.setStyleSheet("color: #c53030; font-size: 8pt;")
+        error.setWordWrap(True)
+        container_layout.addWidget(error)
+        self.field_errors[key] = error
+        self.fields[key].editingFinished.connect(
+            lambda k=key: self._validate_field(k)
+        )
+        return container
 
     def _build(self):
         page_scroll = QScrollArea()
@@ -98,7 +179,7 @@ class DzSaveWindow(QMainWindow):
             )
         ):
             folder_layout.addWidget(QLabel(label), row, 0)
-            folder_layout.addWidget(self.fields[key], row, 1)
+            folder_layout.addWidget(self._validated_field(key), row, 1)
             browse = QPushButton("Browse...")
             browse.clicked.connect(lambda checked=False, field=key: self._browse(field))
             folder_layout.addWidget(browse, row, 2)
@@ -123,12 +204,14 @@ class DzSaveWindow(QMainWindow):
             ("jpeg_quality", "DeepZoom JPEG quality"),
             ("thumbnail_size", "Thumbnail max size (pixels)"),
             ("thumbnail_quality", "Thumbnail JPEG quality"),
+            ("conversion_threads", "Conversion threads"),
         )
         for key, label in labels:
-            settings_layout.addRow(label, self.fields[key])
+            settings_layout.addRow(label, self._validated_field(key))
         settings_layout.addRow("DeepZoom output format", self.deepzoom_format)
         settings_layout.addRow(
-            "WSI file extensions (comma-separated)", self.fields["wsi_extensions"]
+            "WSI file extensions (comma-separated)",
+            self._validated_field("wsi_extensions"),
         )
         settings_layout.addRow(
             QLabel("Extensions must be supported by your installed libvips loaders.")
@@ -144,7 +227,7 @@ class DzSaveWindow(QMainWindow):
             ("robocopy_retries", "Retry count"),
             ("robocopy_wait", "Wait between retries (seconds)"),
         ):
-            copy_layout.addRow(label, self.fields[key])
+            copy_layout.addRow(label, self._validated_field(key))
         add_collapsible_section(options_layout, "Robocopy", copy_box)
         options_container.setVisible(False)
         self.options_toggle.toggled.connect(options_container.setVisible)
@@ -259,7 +342,7 @@ class DzSaveWindow(QMainWindow):
 
         progress_box = QGroupBox("Conversion progress")
         progress_layout = QVBoxLayout(progress_box)
-        self.progress_status = QLabel("Ready")
+        self.progress_status = QLabel("Overall — Ready")
         progress_layout.addWidget(self.progress_status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -278,8 +361,32 @@ class DzSaveWindow(QMainWindow):
         self.scan_button.clicked.connect(self.scan)
         buttons.addWidget(self.scan_button)
         self.start_button = QPushButton("Start conversion")
+        self.start_button.setStyleSheet(
+            "QPushButton {"
+            "  background: #2563eb;"
+            "  color: white;"
+            "  font-weight: bold;"
+            "  border-radius: 4px;"
+            "  padding: 6px 16px;"
+            "}"
+            "QPushButton:hover { background: #1d4ed8; }"
+            "QPushButton:pressed { background: #1e40af; }"
+            "QPushButton:disabled { background: #9ca3af; color: #e5e7eb; }"
+        )
         self.start_button.clicked.connect(self.start_conversion)
         buttons.addWidget(self.start_button)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._request_cancel)
+        self.cancel_button.setEnabled(False)
+        buttons.addWidget(self.cancel_button)
+        self.reset_button = QPushButton("Reset to defaults")
+        self.reset_button.clicked.connect(self._reset_defaults)
+        buttons.addWidget(self.reset_button)
+        self.dark_toggle = QPushButton("Dark mode")
+        self.dark_toggle.setCheckable(True)
+        self.dark_toggle.setChecked(False)
+        self.dark_toggle.clicked.connect(self._toggle_dark_mode)
+        buttons.addWidget(self.dark_toggle)
         layout.addLayout(buttons)
         layout.addStretch(1)
 
@@ -349,6 +456,78 @@ class DzSaveWindow(QMainWindow):
         self.file_list.setEnabled(not busy)
         self.select_all_button.setEnabled(not busy)
         self.select_none_button.setEnabled(not busy)
+        self.cancel_button.setEnabled(busy)
+
+    def _request_cancel(self):
+        common.request_cancel()
+        self.status.setText("Cancellation requested. Stopping after current file...")
+
+    def _reset_defaults(self):
+        if self.busy:
+            return
+        for key, field in self.fields.items():
+            field.setText(common.DEFAULTS.get(key, ""))
+        index = self.deepzoom_format.findData(common.DEFAULTS["deepzoom_format"])
+        if index >= 0:
+            self.deepzoom_format.setCurrentIndex(index)
+        self.destination_values = list(common.DEFAULT_DESTINATIONS)
+        self._render_destinations()
+        for key, error in self.field_errors.items():
+            error.setText("")
+            field = self.fields.get(key)
+            if field is not None:
+                field.setStyleSheet("")
+        self.status.setText("Settings reset to defaults.")
+
+    def _toggle_dark_mode(self, checked):
+        self.dark_mode = checked
+        self.dark_toggle.setText("Light mode" if self.dark_mode else "Dark mode")
+        self._apply_dark_mode(self.dark_mode)
+
+    def _apply_dark_mode(self, dark):
+        app = QApplication.instance()
+        if app is None:
+            return
+        palette = QPalette()
+        if dark:
+            palette.setColor(QPalette.ColorRole.Window, QColor(43, 43, 43))
+            palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.Base, QColor(30, 30, 30))
+            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(58, 58, 58))
+            palette.setColor(QPalette.ColorRole.Text, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.Button, QColor(58, 58, 58))
+            palette.setColor(QPalette.ColorRole.ButtonText, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+        app.setPalette(palette)
+
+    def _add_shortcuts(self):
+        self.shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.shortcut_escape.activated.connect(self._on_escape)
+        self.shortcut_f5 = QShortcut(QKeySequence(Qt.Key.Key_F5), self)
+        self.shortcut_f5.activated.connect(self._on_f5)
+        self.shortcut_reset = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.shortcut_reset.activated.connect(self._on_reset_shortcut)
+
+    def _add_tooltips(self):
+        self.scan_button.setToolTip("Scan the source folder for WSI files.")
+        self.start_button.setToolTip("Start conversion of the selected WSI files (F5).")
+        self.cancel_button.setToolTip("Cancel the running conversion after the current file (Escape).")
+        self.reset_button.setToolTip("Reset all settings to their default values (Ctrl+R).")
+        self.open_report_button.setToolTip("Open the generated conversion report.")
+        self.log_toggle.setToolTip("Show or hide the detailed text output.")
+
+    def _on_escape(self):
+        if self.cancel_button.isEnabled():
+            self._request_cancel()
+
+    def _on_f5(self):
+        if self.start_button.isEnabled():
+            self.start_conversion()
+
+    def _on_reset_shortcut(self):
+        if self.reset_button.isEnabled():
+            self._reset_defaults()
 
     def _set_all_files(self, checked):
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
@@ -394,6 +573,7 @@ class DzSaveWindow(QMainWindow):
     def start_conversion(self):
         if self.busy:
             return
+        self._validate_all_fields()
         try:
             settings = common.validate_settings(
                 {
@@ -411,7 +591,7 @@ class DzSaveWindow(QMainWindow):
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.stage_progress.setValue(0)
-        self.progress_status.setText("Starting conversion")
+        self.progress_status.setText("Overall — Starting conversion")
         self.status.setText("Conversion running...")
         self.report_info.setText("Creating conversion log and Markdown report...")
         self.open_report_button.setEnabled(False)
@@ -457,7 +637,7 @@ class DzSaveWindow(QMainWindow):
                 self.progress.setValue(round(min(total, overall) * 100))
                 self.stage_progress.setValue(round(payload["stage_value"] * 100))
                 self.progress_status.setText(
-                    f"{payload['message']} — "
+                    f"Overall — {payload['message']} — "
                     f"{payload['completed_files']} of {payload['files_total']} files complete"
                 )
                 self.status.setText(payload["message"])

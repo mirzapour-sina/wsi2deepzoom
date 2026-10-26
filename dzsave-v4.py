@@ -743,88 +743,95 @@ def convert_wsi(
 
         copy_elapsed = 0
         copy_results = []
+        _copy_lock = threading.Lock()
 
-        for index, (destination_folder, destination_output) in enumerate(
-            additional_outputs, start=1
-        ):
-            report_progress(
-                "copy", 3, 4, input_file, "No additional destinations to copy",
-                file_index=current, files_total=total,
-            )
-        else:
-            def _copy_one(index, destination_folder, destination_output):
+        if additional_outputs:
+            def copy_one_destination(index, destination_folder, destination_output):
+                report_progress(
+                    "copy",
+                    2 + index / max(1, len(additional_outputs)),
+                    4,
+                    input_file,
+                    f"Copying to destination {index} of {len(additional_outputs)}",
+                    metrics,
+                )
                 secondary_exists = deepzoom_exists(destination_output)
                 secondary_thumbnail_exists = (
                     destination_folder / "thumbnail.jpg"
                 ).exists()
 
                 if secondary_exists and secondary_thumbnail_exists:
-                    return index, {
+                    result = {
                         "destination": str(destination_folder),
                         "status": "Skipped (already exists)",
                         "duration_seconds": 0,
-                    }, 0, None
+                    }
+                    with _copy_lock:
+                        copy_results.append(result)
+                        metrics["copy_destinations"] = list(copy_results)
+                    print(
+                        f"DeepZoom and thumbnail already exist at "
+                        f"{destination_folder}. Skipping copy."
+                    )
+                    return index, result, 0, destination_output
 
                 try:
                     destination_copy_elapsed = copy_deepzoom(
                         primary_output, destination_output
                     )
                 except Exception as copy_error:
-                    return index, {
+                    result = {
                         "destination": str(destination_folder),
                         "status": f"Failed: {copy_error}",
                         "duration_seconds": 0,
-                    }, 0, copy_error
+                    }
+                    with _copy_lock:
+                        copy_results.append(result)
+                        metrics["copy_destinations"] = list(copy_results)
+                    print(f"Copy to {destination_folder} failed: {copy_error}")
+                    return index, result, 0, destination_output
 
-                return index, {
+                result = {
                     "destination": str(destination_folder),
                     "status": "Complete",
                     "duration_seconds": destination_copy_elapsed,
-                }, destination_copy_elapsed, None
+                }
+                with _copy_lock:
+                    copy_results.append(result)
+                    metrics["copy_destinations"] = list(copy_results)
+                return index, result, destination_copy_elapsed, destination_output
 
-            copy_threads = max(1, min(CONVERSION_THREADS, len(additional_outputs)))
-            with ThreadPoolExecutor(max_workers=copy_threads) as copy_executor:
-                copy_futures = [
+            with ThreadPoolExecutor(max_workers=CONVERSION_THREADS) as copy_executor:
+                futures = [
                     copy_executor.submit(
-                        _copy_one,
-                        index,
-                        destination_folder,
-                        destination_output,
+                        copy_one_destination, index, folder, output
                     )
-                    for index, (destination_folder, destination_output) in enumerate(
+                    for index, (folder, output) in enumerate(
                         additional_outputs, start=1
                     )
                 ]
-                for copy_future in copy_futures:
-                    index, result, elapsed, copy_error = copy_future.result()
-                    copy_results.append(result)
-                    copy_elapsed += elapsed
+                for future in as_completed(futures):
+                    index, result, duration, dest_output = future.result()
+                    copy_elapsed += duration
                     metrics["copy_seconds"] = copy_elapsed
-                    metrics["copy_destinations"] = list(copy_results)
-                    status = result["status"]
-                    if status.startswith("Skipped"):
-                        print(
-                            f"DeepZoom and thumbnail already exist at "
-                            f"{result['destination']}. Skipping copy."
-                        )
-                    elif status.startswith("Failed"):
-                        print(f"Copy to {result['destination']} failed: {copy_error}")
-                    else:
-                        print()
-                        print(
-                            "DeepZoom copy complete: "
-                            f"{result['destination']}"
-                        )
-                        print(f"Copy time: {format_time(elapsed)}")
                     report_progress(
                         "copy",
                         3,
                         4,
                         input_file,
-                        f"Destination {index} of {len(additional_outputs)} copy complete",
+                        f"Destination {index} copy complete",
                         metrics,
-                        file_index=current, files_total=total,
                     )
+                    print()
+                    print(
+                        "DeepZoom copy complete: "
+                        f"{deepzoom_storage_path(dest_output)}"
+                    )
+                    print(f"Copy time: {format_time(copy_elapsed)}")
+        else:
+            report_progress(
+                "copy", 3, 4, input_file, "No additional destinations to copy"
+            )
 
         # =================================================
         # TOTAL TIME FOR THIS WSI

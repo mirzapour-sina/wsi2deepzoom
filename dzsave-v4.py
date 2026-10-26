@@ -120,8 +120,23 @@ RUN_START_PERF = None
 _SCAN_CACHE = {}
 
 
-def report_progress(stage, current, total, input_file=None, message="", metrics=None):
+def report_progress(
+    stage,
+    current,
+    total,
+    input_file=None,
+    message="",
+    metrics=None,
+    file_index=None,
+    files_total=None,
+):
     if PROGRESS_CALLBACK is not None:
+        file_index = (
+            file_index if file_index is not None else PROGRESS_FILE_INDEX
+        )
+        files_total = (
+            files_total if files_total is not None else PROGRESS_FILE_TOTAL
+        )
         PROGRESS_CALLBACK(
             {
                 "stage": stage,
@@ -130,12 +145,12 @@ def report_progress(stage, current, total, input_file=None, message="", metrics=
                 "total": total,
                 "file": str(input_file) if input_file is not None else "",
                 "message": message,
-                "file_index": PROGRESS_FILE_INDEX,
-                "files_total": PROGRESS_FILE_TOTAL,
+                "file_index": file_index,
+                "files_total": files_total,
                 "completed_files": (
-                    PROGRESS_FILE_INDEX
+                    file_index
                     if stage in {"complete", "error", "finished"}
-                    else max(0, PROGRESS_FILE_INDEX - 1)
+                    else max(0, file_index - 1)
                 ),
                 "metrics": copy.deepcopy(metrics or {}),
                 "run_elapsed_seconds": (
@@ -392,9 +407,14 @@ def convert_wsi(
 
     Then copies the DeepZoom and thumbnail
     to any additional destinations.
+
+    When _output is a dict, the per-slide metrics are written into it
+    (instead of the module-level LAST_CONVERSION_METRICS) so that
+    concurrent conversions do not clobber each other's results.
     """
 
-    global LAST_CONVERSION_METRICS
+    if _output is None:
+        global LAST_CONVERSION_METRICS, LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
     wsi_start = time.perf_counter()
     metrics = {
         "resolution": "",
@@ -524,6 +544,7 @@ def convert_wsi(
                 input_file,
                 "Already converted",
                 metrics,
+                file_index=current, files_total=total,
             )
             print()
             print("DeepZoom and thumbnail already exist. Skipping image load.")
@@ -546,6 +567,7 @@ def convert_wsi(
                 input_file,
                 "Source image loaded",
                 metrics,
+                file_index=current, files_total=total,
             )
             print(f"Image size: {image.width:,} x {image.height:,}")
             print(f"Load time: {format_time(load_elapsed)}")
@@ -559,7 +581,8 @@ def convert_wsi(
             metrics["deepzoom_status"] = "Skipped (already exists)"
 
             report_progress(
-                "deepzoom", 1, 4, input_file, "DeepZoom already exists", metrics
+                "deepzoom", 1, 4, input_file, "DeepZoom already exists", metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -574,7 +597,8 @@ def convert_wsi(
         else:
             metrics["deepzoom_status"] = "Converting"
             report_progress(
-                "deepzoom", 1, 4, input_file, "Converting to DeepZoom", metrics
+                "deepzoom", 1, 4, input_file, "Converting to DeepZoom", metrics,
+                file_index=current, files_total=total,
             )
 
             # ---------------------------------------------
@@ -623,6 +647,7 @@ def convert_wsi(
                 input_file,
                 "DeepZoom conversion complete",
                 metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -643,7 +668,8 @@ def convert_wsi(
         if thumb_exists:
             metrics["thumbnail_status"] = "Skipped (already exists)"
             report_progress(
-                "thumbnail", 2, 4, input_file, "Thumbnail already exists", metrics
+                "thumbnail", 2, 4, input_file, "Thumbnail already exists", metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -658,7 +684,8 @@ def convert_wsi(
         else:
             metrics["thumbnail_status"] = "Creating"
             report_progress(
-                "thumbnail", 2, 4, input_file, "Creating thumbnail", metrics
+                "thumbnail", 2, 4, input_file, "Creating thumbnail", metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -688,6 +715,7 @@ def convert_wsi(
                 input_file,
                 "Thumbnail creation complete",
                 metrics,
+                file_index=current, files_total=total,
             )
 
             print()
@@ -827,7 +855,8 @@ def convert_wsi(
             f"[{current}/{total}] COMPLETE"
         )
         report_progress(
-            "complete", 4, 4, input_file, "Slide complete", metrics
+            "complete", 4, 4, input_file, "Slide complete", metrics,
+            file_index=current, files_total=total,
         )
 
         print(
@@ -853,12 +882,14 @@ def convert_wsi(
         return wsi_elapsed
 
     except Exception as e:
-        global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
-        LAST_CONVERSION_ERROR = str(e)
-        LAST_CONVERSION_DURATION = time.perf_counter() - wsi_start
-        metrics["slide_seconds"] = LAST_CONVERSION_DURATION
-        metrics["error"] = LAST_CONVERSION_ERROR
-        report_progress("error", 4, 4, input_file, "Slide failed", metrics)
+        if _output is None:
+            global LAST_CONVERSION_DURATION, LAST_CONVERSION_ERROR
+            LAST_CONVERSION_ERROR = str(e)
+            LAST_CONVERSION_DURATION = time.perf_counter() - wsi_start
+        metrics["slide_seconds"] = time.perf_counter() - wsi_start
+        metrics["error"] = str(e)
+        report_progress("error", 4, 4, input_file, "Slide failed", metrics,
+                        file_index=current, files_total=total)
 
         wsi_elapsed = (
             time.perf_counter()
@@ -1047,10 +1078,9 @@ def main():
     # Process files
     # =====================================================
 
-    for current, input_file in enumerate(
-        wsi_files,
-        start=1,
-    ):
+    def _process_one(current, input_file):
+        global PROGRESS_FILE_INDEX, PROGRESS_FILE_TOTAL
+        global LAST_CONVERSION_ERROR, LAST_CONVERSION_DURATION, LAST_CONVERSION_METRICS
         PROGRESS_FILE_INDEX = current
         PROGRESS_FILE_TOTAL = total
         report_progress(
@@ -1064,68 +1094,94 @@ def main():
         LAST_CONVERSION_ERROR = None
         LAST_CONVERSION_DURATION = None
         LAST_CONVERSION_METRICS = {}
+        output = {}
         elapsed = convert_wsi(
             input_file,
             current,
             total,
+            _output=output,
         )
-        results.append(
-            {
-                "file": str(input_file),
-                "status": "complete" if elapsed is not None else "failed",
-                "duration_seconds": (
-                    elapsed
-                    if elapsed is not None
-                    else LAST_CONVERSION_DURATION
-                ),
-                "error": LAST_CONVERSION_ERROR or "",
-                **LAST_CONVERSION_METRICS,
-            }
-        )
+        return {
+            "current": current,
+            "input_file": input_file,
+            "elapsed": elapsed,
+            "output": output,
+            "error": LAST_CONVERSION_ERROR or "",
+            "duration": LAST_CONVERSION_DURATION,
+        }
 
-        if elapsed is None:
-
-            failed += 1
-
-        else:
-
-            completed += 1
-
-            processing_times.append(
-                elapsed
+    with ThreadPoolExecutor(max_workers=CONVERSION_THREADS) as executor:
+        futures = [
+            executor.submit(
+                _process_one, current, input_file
+            )
+            for current, input_file in enumerate(wsi_files, start=1)
+        ]
+        for future in as_completed(futures):
+            item = future.result()
+            current = item["current"]
+            input_file = item["input_file"]
+            elapsed = item["elapsed"]
+            output = item["output"]
+            PROGRESS_FILE_INDEX = current
+            PROGRESS_FILE_TOTAL = total
+            results.append(
+                {
+                    "file": str(input_file),
+                    "status": "complete" if elapsed is not None else "failed",
+                    "duration_seconds": (
+                        elapsed
+                        if elapsed is not None
+                        else item["duration"]
+                    ),
+                    "error": item["error"],
+                    **output,
+                }
             )
 
-        # -------------------------------------------------
-        # Overall progress
-        # -------------------------------------------------
+            if elapsed is None:
 
-        overall_elapsed = (
-            time.perf_counter()
-            - total_start
-        )
+                failed += 1
 
-        percentage = (
-            current / total
-        ) * 100
-        report_progress(
-            "complete" if elapsed is not None else "error",
-            4,
-            4,
-            input_file,
-            f"Completed {current} of {total} slides",
-        )
+            else:
 
-        print()
-        print(
-            f"Overall progress: "
-            f"{current}/{total} "
-            f"({percentage:.1f}%)"
-        )
+                completed += 1
 
-        print(
-            f"Total elapsed: "
-            f"{format_time(overall_elapsed)}"
-        )
+                processing_times.append(
+                    elapsed
+                )
+
+            # -------------------------------------------------
+            # Overall progress
+            # -------------------------------------------------
+
+            overall_elapsed = (
+                time.perf_counter()
+                - total_start
+            )
+
+            percentage = (
+                current / total
+            ) * 100
+            report_progress(
+                "complete" if elapsed is not None else "error",
+                4,
+                4,
+                input_file,
+                f"Completed {current} of {total} slides",
+            )
+
+            print()
+            print(
+                f"Overall progress: "
+                f"{current}/{total} "
+                f"({percentage:.1f}%)"
+            )
+
+            print(
+                f"Total elapsed: "
+                f"{format_time(overall_elapsed)}"
+            )
 
     # =====================================================
     # Final statistics

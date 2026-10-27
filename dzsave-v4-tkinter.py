@@ -52,6 +52,7 @@ class DzSaveWindow:
         "robocopy_threads": (1, 128, "Copy threads must be between 1 and 128."),
         "robocopy_retries": (0, None, "Copy retries cannot be negative."),
         "robocopy_wait": (0, None, "Retry wait cannot be negative."),
+        "conversion_threads": (1, 128, "Conversion threads must be between 1 and 128."),
     }
 
     def __init__(self, root):
@@ -104,6 +105,10 @@ class DzSaveWindow:
             if number < minimum or (maximum is not None and number > maximum):
                 return message
             return None
+        if key.startswith("destination_"):
+            if not value.strip():
+                return "Enter a destination folder."
+            return None
         return None
 
     def _validate_field(self, key):
@@ -118,6 +123,13 @@ class DzSaveWindow:
             error_label.config(text=error)
         else:
             error_label.config(text="")
+        return error is None
+
+    def _validate_destination(self, index):
+        """Show or clear the inline error label for a destination field."""
+        value = self.destinations[index].get()
+        error = self._check_field(f"destination_{index}", value)
+        self.destination_errors[index].config(text=error or "")
         return error is None
 
     def _build(self):
@@ -167,6 +179,7 @@ class DzSaveWindow:
             command=self._add_destination,
         )
         self.add_destination_button.grid(row=1, column=0, sticky="e", pady=(5, 0))
+        ToolTip(self.add_destination_button, "Add another output destination.")
         self._render_destinations()
 
         self.options_visible = False
@@ -518,6 +531,7 @@ class DzSaveWindow:
             buttons, text="Dark mode", command=self._toggle_dark_mode
         )
         self.dark_toggle.pack(side=tk.LEFT, padx=(8, 0))
+        ToolTip(self.dark_toggle, "Toggle dark mode.")
 
     def _path_row(self, parent, row, key, label):
         ttk.Label(parent, text=label).grid(
@@ -548,18 +562,35 @@ class DzSaveWindow:
     def _render_destinations(self):
         for child in self.destinations_frame.winfo_children():
             child.destroy()
+        self.destination_entries = []
+        self.destination_errors = []
         for index, value in enumerate(self.destinations):
             ttk.Label(self.destinations_frame, text=f"Destination {index + 1}").grid(
                 row=index, column=0, sticky="w", padx=(0, 10), pady=3
             )
-            ttk.Entry(self.destinations_frame, textvariable=value).grid(
-                row=index, column=1, sticky="ew", pady=3
+            entry = ttk.Entry(self.destinations_frame, textvariable=value)
+            entry.grid(row=index, column=1, sticky="ew", pady=3)
+            entry.bind(
+                "<FocusOut>", lambda _event, i=index: self._validate_destination(i)
             )
-            ttk.Button(
+            self.destination_entries.append(entry)
+            self.field_entries[f"destination_{index}"] = entry
+            error = tk.Label(
+                self.destinations_frame,
+                text="",
+                foreground="#c53030",
+                font=("Segoe UI", 8),
+            )
+            error.grid(row=index, column=1, columnspan=2, sticky="w", pady=(1, 0))
+            self.destination_errors.append(error)
+            self.field_errors[f"destination_{index}"] = error
+            browse_button = ttk.Button(
                 self.destinations_frame,
                 text="Browse...",
                 command=lambda path=value: self._browse_destination(path),
-            ).grid(row=index, column=2, padx=(8, 0), pady=3)
+            )
+            browse_button.grid(row=index, column=2, padx=(8, 0), pady=3)
+            ToolTip(browse_button, "Browse for a destination folder.")
             ttk.Button(
                 self.destinations_frame,
                 text="Remove",

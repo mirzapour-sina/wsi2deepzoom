@@ -112,6 +112,10 @@ class DzSaveWindow(QMainWindow):
             if number < minimum or (maximum is not None and number > maximum):
                 return message
             return None
+        if key.startswith("destination_"):
+            if not value.strip():
+                return "Enter a destination folder."
+            return None
         return None
 
     def _validate_field(self, key):
@@ -137,6 +141,19 @@ class DzSaveWindow(QMainWindow):
             if not self._validate_field(key):
                 valid = False
         return valid
+
+    def _validate_destination(self, index):
+        """Show or clear the inline error label for a destination field."""
+        field = self.destination_fields[index]
+        error_label = self.destination_errors[index]
+        error = self._check_field(f"destination_{index}", field.text())
+        if error:
+            field.setStyleSheet("border: 1px solid #c53030;")
+            error_label.setText(error)
+        else:
+            field.setStyleSheet("")
+            error_label.setText("")
+        return error is None
 
     def _validated_field(self, key):
         """Return a container pairing self.fields[key] with an inline error label."""
@@ -409,26 +426,42 @@ class DzSaveWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
         self.destination_fields = []
+        self.destination_errors = []
         for index, value in enumerate(self.destination_values):
             row_widget = QWidget()
-            row = QHBoxLayout(row_widget)
-            row.addWidget(QLabel(f"Destination {index + 1}"))
+            row = QVBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(2)
+            field_row = QHBoxLayout()
+            field_row.addWidget(QLabel(f"Destination {index + 1}"))
             field = QLineEdit(value)
             self.destination_fields.append(field)
-            row.addWidget(field, 1)
+            field.editingFinished.connect(
+                lambda k=index: self._validate_destination(k)
+            )
+            field_row.addWidget(field, 1)
             browse = QPushButton("Browse...")
+            browse.setToolTip("Browse for a destination folder.")
             browse.clicked.connect(
                 lambda checked=False, current=index: self._browse_destination(current)
             )
-            row.addWidget(browse)
+            field_row.addWidget(browse)
             remove = QPushButton("Remove")
             remove.setEnabled(index > 0 and len(self.destination_values) > 1)
             remove.clicked.connect(
                 lambda checked=False, current=index: self._remove_destination(current)
             )
-            row.addWidget(remove)
+            field_row.addWidget(remove)
+            row.addLayout(field_row)
+            error = QLabel("")
+            error.setStyleSheet("color: #c53030; font-size: 8pt;")
+            error.setWordWrap(True)
+            row.addWidget(error)
+            self.destination_errors.append(error)
+            self.field_errors[f"destination_{index}"] = error
             self.destinations_layout.addWidget(row_widget)
         add = QPushButton("Add destination")
+        add.setToolTip("Add another output destination.")
         add.clicked.connect(self._add_destination)
         self.destinations_layout.addWidget(add)
 
@@ -516,6 +549,7 @@ class DzSaveWindow(QMainWindow):
         self.reset_button.setToolTip("Reset all settings to their default values (Ctrl+R).")
         self.open_report_button.setToolTip("Open the generated conversion report.")
         self.log_toggle.setToolTip("Show or hide the detailed text output.")
+        self.dark_toggle.setToolTip("Toggle dark mode.")
 
     def _on_escape(self):
         if self.cancel_button.isEnabled():

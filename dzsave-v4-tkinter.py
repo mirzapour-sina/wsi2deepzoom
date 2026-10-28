@@ -132,6 +132,25 @@ class DzSaveWindow:
         self.destination_errors[index].config(text=error or "")
         return error is None
 
+    def _validate_all_fields(self):
+        """Validate every editable field and return True when all are valid."""
+        valid = True
+        for key in list(self.field_entries):
+            if key.startswith("destination_"):
+                continue
+            if not self._validate_field(key):
+                valid = False
+        for index in range(len(self.destinations)):
+            if not self._validate_destination(index):
+                valid = False
+        return valid
+
+    def _format_key_for_label(self, label):
+        """Return the DeepZoom format key matching the shown label, unchanged if unknown."""
+        if label in self.format_labels:
+            return self.format_keys[self.format_labels.index(label)]
+        return label
+
     def _build(self):
         page = ttk.Frame(self.root)
         page.pack(fill=tk.BOTH, expand=True)
@@ -206,9 +225,16 @@ class DzSaveWindow:
                 "Hide DeepZoom and thumbnail options",
             ),
         )
+        self.settings_toggle.configure(text="Hide DeepZoom and thumbnail options")
         self.settings_toggle.grid(row=0, column=0, sticky="w")
         settings.grid(row=1, column=0, sticky="ew")
-        settings.grid_remove()
+        format_keys = tuple(common.DEEPZOOM_FORMATS)
+        format_labels = tuple(
+            option["label"] for option in common.DEEPZOOM_FORMATS.values()
+        )
+        self.format_keys = format_keys
+        self.format_labels = format_labels
+
         setting_labels = (
             ("jpeg_quality", "DeepZoom JPEG quality"),
             ("thumbnail_size", "Thumbnail max size (px)"),
@@ -230,12 +256,18 @@ class DzSaveWindow:
         ttk.Label(settings, text="DeepZoom output format").grid(
             row=1, column=0, sticky="w", padx=4, pady=(10, 0)
         )
-        ttk.Combobox(
+        self.format_combo = ttk.Combobox(
             settings,
             textvariable=self.values["deepzoom_format"],
-            values=tuple(common.DEEPZOOM_FORMATS),
+            values=format_labels,
             state="readonly",
-        ).grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
+        )
+        self.format_combo.grid(row=2, column=0, sticky="ew", padx=4, pady=(4, 0))
+        try:
+            default_index = format_keys.index(common.DEFAULTS["deepzoom_format"])
+        except ValueError:
+            default_index = 0
+        self.format_combo.current(default_index)
         ttk.Label(settings, text="WSI file extensions (comma-separated)").grid(
             row=1, column=1, columnspan=2, sticky="w", padx=4, pady=(10, 0)
         )
@@ -261,9 +293,9 @@ class DzSaveWindow:
                 "Show Robocopy options", "Hide Robocopy options"
             ),
         )
+        self.copy_toggle.configure(text="Hide Robocopy options")
         self.copy_toggle.grid(row=2, column=0, sticky="w", pady=(8, 0))
         copy_settings.grid(row=3, column=0, sticky="ew")
-        copy_settings.grid_remove()
         for column, (key, label) in enumerate(
             (
                 ("robocopy_threads", "Robocopy threads"),
@@ -369,7 +401,7 @@ class DzSaveWindow:
         self.activity_values = {}
         detail_fields = (
             ("file", "Current file"),
-            ("resolution", "Source resolution"),
+            ("resolution", "Resolution"),
             ("load", "Source load"),
             ("deepzoom", "DeepZoom"),
             ("thumbnail", "Thumbnail"),
@@ -379,7 +411,7 @@ class DzSaveWindow:
             ("counts", "File totals"),
             ("outputs", "Output paths"),
         )
-        for index, (key, label) in enumerate(detail_fields):
+        for index, (key, label) in enumerate(detail_fields[:8]):
             row, pair = divmod(index, 2)
             column = pair * 2
             ttk.Label(metrics_frame, text=label).grid(
@@ -390,6 +422,24 @@ class DzSaveWindow:
                 row=row, column=column + 1, sticky="nw", padx=(0, 12), pady=2
             )
             self.activity_values[key] = value
+        ttk.Label(metrics_frame, text="File totals").grid(
+            row=4, column=0, sticky="nw", padx=(0, 5), pady=2
+        )
+        self.activity_values["counts"] = tk.StringVar(value="—")
+        ttk.Label(
+            metrics_frame,
+            textvariable=self.activity_values["counts"],
+            wraplength=650,
+        ).grid(row=4, column=1, columnspan=3, sticky="nw", padx=(0, 12), pady=2)
+        ttk.Label(metrics_frame, text="Output paths").grid(
+            row=5, column=0, sticky="nw", padx=(0, 5), pady=2
+        )
+        self.activity_values["outputs"] = tk.StringVar(value="—")
+        ttk.Label(
+            metrics_frame,
+            textvariable=self.activity_values["outputs"],
+            wraplength=650,
+        ).grid(row=5, column=1, columnspan=3, sticky="nw", padx=(0, 12), pady=2)
         self.run_summary = tk.StringVar(
             value="Started: — | Finished: — | Average per file: —"
         )
@@ -591,7 +641,7 @@ class DzSaveWindow:
             )
             browse_button.grid(row=index, column=2, padx=(8, 0), pady=3)
             ToolTip(browse_button, "Browse for a destination folder.")
-            ttk.Button(
+            remove_button = ttk.Button(
                 self.destinations_frame,
                 text="Remove",
                 command=lambda item=value: self._remove_destination(item),
@@ -600,7 +650,9 @@ class DzSaveWindow:
                     if index > 0 and len(self.destinations) > 1
                     else tk.DISABLED
                 ),
-            ).grid(row=index, column=3, padx=(6, 0), pady=3)
+            )
+            remove_button.grid(row=index, column=3, padx=(6, 0), pady=3)
+            ToolTip(remove_button, "Remove this destination.")
 
     def _browse_destination(self, value):
         selected = filedialog.askdirectory(initialdir=value.get())
@@ -747,9 +799,17 @@ class DzSaveWindow:
     def start_conversion(self):
         if self.busy:
             return
+        if not self._validate_all_fields():
+            return
         try:
+            form_values = {
+                key: variable.get() for key, variable in self.values.items()
+            }
+            form_values["deepzoom_format"] = self._format_key_for_label(
+                form_values["deepzoom_format"]
+            )
             settings = common.validate_settings(
-                {key: variable.get() for key, variable in self.values.items()},
+                form_values,
                 self._selected_files(),
                 [destination.get() for destination in self.destinations],
             )

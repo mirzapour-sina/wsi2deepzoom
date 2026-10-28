@@ -108,23 +108,6 @@ def validate_settings(values, selected_files=None, destinations=None):
     if not input_dir.is_dir():
         raise ValueError("Select an existing input folder.")
 
-    if destinations is None:
-        destinations = DEFAULT_DESTINATIONS
-    output_dirs = []
-    normalized_destinations = set()
-    for raw_path in destinations:
-        raw_path = str(raw_path).strip()
-        if not raw_path:
-            raise ValueError("Remove empty destination folders or select a folder.")
-        output_dir = Path(raw_path).expanduser()
-        normalized_path = os.path.normcase(os.path.abspath(output_dir))
-        if normalized_path in normalized_destinations:
-            raise ValueError(f"Destination folder is listed more than once: {output_dir}")
-        normalized_destinations.add(normalized_path)
-        output_dirs.append(output_dir)
-    if not output_dirs:
-        raise ValueError("Add at least one destination folder.")
-
     deepzoom_format = str(values.get("deepzoom_format", "dzi")).strip().lower()
     if deepzoom_format not in DEEPZOOM_FORMATS:
         raise ValueError(
@@ -161,6 +144,23 @@ def validate_settings(values, selected_files=None, destinations=None):
         raise ValueError("Conversion threads must be between 1 and 128.")
     if settings["robocopy_retries"] < 0 or settings["robocopy_wait"] < 0:
         raise ValueError("Copy retries and retry wait cannot be negative.")
+
+    if destinations is None:
+        destinations = DEFAULT_DESTINATIONS
+    output_dirs = []
+    normalized_destinations = set()
+    for raw_path in destinations:
+        raw_path = str(raw_path).strip()
+        if not raw_path:
+            raise ValueError("Remove empty destination folders or select a folder.")
+        output_dir = Path(raw_path).expanduser()
+        normalized_path = os.path.normcase(os.path.abspath(output_dir))
+        if normalized_path in normalized_destinations:
+            raise ValueError(f"Destination folder is listed more than once: {output_dir}")
+        normalized_destinations.add(normalized_path)
+        output_dirs.append(output_dir)
+    if not output_dirs:
+        raise ValueError("Add at least one destination folder.")
 
     settings["input_dir"] = input_dir
     settings["destinations"] = output_dirs

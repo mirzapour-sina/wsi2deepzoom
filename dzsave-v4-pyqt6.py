@@ -209,8 +209,8 @@ class DzSaveWindow(QMainWindow):
         layout.addWidget(destinations)
 
         self.options_toggle = QToolButton()
-        self.options_toggle.setText("Advanced DeepZoom and Robocopy options")
         self.options_toggle.setCheckable(True)
+        self.options_toggle.setText("Show DeepZoom and Robocopy options")
         layout.addWidget(self.options_toggle)
         options_container = QWidget()
         options_layout = QVBoxLayout(options_container)
@@ -234,7 +234,7 @@ class DzSaveWindow(QMainWindow):
             QLabel("Extensions must be supported by your installed libvips loaders.")
         )
         add_collapsible_section(
-            options_layout, "DeepZoom and thumbnail", settings_box
+            options_layout, "DeepZoom and thumbnail", settings_box, expanded=True
         )
 
         copy_box = QGroupBox()
@@ -245,9 +245,16 @@ class DzSaveWindow(QMainWindow):
             ("robocopy_wait", "Wait between retries (seconds)"),
         ):
             copy_layout.addRow(label, self._validated_field(key))
-        add_collapsible_section(options_layout, "Robocopy", copy_box)
+        add_collapsible_section(options_layout, "Robocopy", copy_box, expanded=True)
         options_container.setVisible(False)
         self.options_toggle.toggled.connect(options_container.setVisible)
+        self.options_toggle.toggled.connect(
+            lambda checked: self.options_toggle.setText(
+                "Hide DeepZoom and Robocopy options"
+                if checked
+                else "Show DeepZoom and Robocopy options"
+            )
+        )
         layout.addWidget(options_container)
 
         selection = QGroupBox("Found WSI files (checked files will be converted)")
@@ -289,18 +296,18 @@ class DzSaveWindow(QMainWindow):
         activity_layout.addLayout(report_row)
         details = QGroupBox()
         details_grid = QGridLayout(details)
+        details_grid.setColumnStretch(1, 1)
+        details_grid.setColumnStretch(3, 1)
         self.activity_values = {}
         detail_fields = (
             ("file", "Current file"),
-            ("resolution", "Source resolution"),
+            ("resolution", "Resolution"),
             ("load", "Source load"),
             ("deepzoom", "DeepZoom"),
             ("thumbnail", "Thumbnail"),
             ("copy", "Copy"),
             ("slide", "Slide total"),
             ("elapsed", "Run elapsed"),
-            ("counts", "File totals"),
-            ("outputs", "Output paths"),
         )
         for index, (key, label) in enumerate(detail_fields):
             row, pair = divmod(index, 2)
@@ -310,6 +317,16 @@ class DzSaveWindow(QMainWindow):
             value.setWordWrap(True)
             details_grid.addWidget(value, row, column + 1)
             self.activity_values[key] = value
+        details_grid.addWidget(QLabel("File totals"), 4, 0)
+        counts_value = QLabel("—")
+        counts_value.setWordWrap(True)
+        details_grid.addWidget(counts_value, 4, 1, 1, 3)
+        self.activity_values["counts"] = counts_value
+        details_grid.addWidget(QLabel("Output paths"), 5, 0)
+        outputs_value = QLabel("—")
+        outputs_value.setWordWrap(True)
+        details_grid.addWidget(outputs_value, 5, 1, 1, 3)
+        self.activity_values["outputs"] = outputs_value
         add_collapsible_section(
             activity_layout, "Live conversion details", details
         )
@@ -359,14 +376,25 @@ class DzSaveWindow(QMainWindow):
 
         progress_box = QGroupBox("Conversion progress")
         progress_layout = QVBoxLayout(progress_box)
-        self.progress_status = QLabel("Ready")
-        progress_layout.addWidget(self.progress_status)
+        overall_row = QHBoxLayout()
+        self.progress_status = QLabel("Overall — Ready")
+        overall_row.addWidget(self.progress_status)
+        self.overall_percent = QLabel("0%")
+        overall_row.addWidget(self.overall_percent)
+        overall_row.addStretch(1)
+        progress_layout.addLayout(overall_row)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
         progress_layout.addWidget(self.progress)
-        progress_layout.addWidget(QLabel("Current slide"))
+        slide_row = QHBoxLayout()
+        self.slide_status = QLabel("Current slide — Ready")
+        slide_row.addWidget(self.slide_status)
+        self.stage_percent = QLabel("0%")
+        slide_row.addWidget(self.stage_percent)
+        slide_row.addStretch(1)
+        progress_layout.addLayout(slide_row)
         self.stage_progress = QProgressBar()
         self.stage_progress.setRange(0, 400)
         self.stage_progress.setFormat("%p%")
@@ -447,12 +475,12 @@ class DzSaveWindow(QMainWindow):
             )
             field_row.addWidget(browse)
             remove = QPushButton("Remove")
-            remove.setToolTip("Remove this destination.")
             remove.setEnabled(index > 0 and len(self.destination_values) > 1)
             remove.clicked.connect(
                 lambda checked=False, current=index: self._remove_destination(current)
             )
             field_row.addWidget(remove)
+            remove.setToolTip("Remove this destination.")
             row.addLayout(field_row)
             error = QLabel("")
             error.setStyleSheet("color: #c53030; font-size: 8pt;")
@@ -626,7 +654,10 @@ class DzSaveWindow(QMainWindow):
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.stage_progress.setValue(0)
-        self.progress_status.setText("Starting conversion")
+        self.progress_status.setText("Overall — Starting conversion")
+        self.overall_percent.setText("0%")
+        self.slide_status.setText("Current slide — Starting conversion")
+        self.stage_percent.setText("0%")
         self.status.setText("Conversion running...")
         self.report_info.setText("Creating conversion log and Markdown report...")
         self.open_report_button.setEnabled(False)
@@ -669,9 +700,13 @@ class DzSaveWindow(QMainWindow):
                 self.progress.setRange(0, total * 100)
                 self.progress.setValue(round(min(total, overall) * 100))
                 self.stage_progress.setValue(round(payload["stage_value"] * 100))
-                self.progress_status.setText(
-                    f"Overall — {payload['message']} — "
-                    f"{payload['completed_files']} of {payload['files_total']} files complete"
+                self.progress_status.setText(f"Overall — {payload['message']}")
+                self.overall_percent.setText(
+                    f"{round(min(total, overall) / total * 100)}%"
+                )
+                self.slide_status.setText(f"Current slide — {payload['message']}")
+                self.stage_percent.setText(
+                    f"{round(payload['stage_value'] / 4 * 100)}%"
                 )
                 self.status.setText(payload["message"])
                 self._update_activity(payload)
@@ -723,6 +758,8 @@ class DzSaveWindow(QMainWindow):
             elif event == "done":
                 self._set_busy(False)
                 self.stage_progress.setValue(400)
+                self.overall_percent.setText("100%")
+                self.stage_percent.setText("100%")
                 if not self.open_report_path:
                     self.status.setText("Conversion ended. Review any error messages.")
         if self.run_started_monotonic is not None and self.busy:

@@ -71,7 +71,11 @@ class DzSaveController(QObject):
         self._results = []
         self._run_summary = "Started: — | Finished: — | Average per file: —"
         self._busy = False
-        self._field_errors = {}
+        # Pre-seed every field error key so QML bindings such as
+        # ``controller.fieldErrors["input_dir"]`` always resolve to a string
+        # instead of ``undefined`` (which QML cannot assign to a QString).
+        self._field_errors = {key: "" for key in common.DEFAULTS}
+        self._field_errors["destination_0"] = ""
         self._dark_mode = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)
@@ -97,12 +101,17 @@ class DzSaveController(QObject):
     @Slot()
     def addDestination(self):
         self._destinations.append("")
+        new_index = len(self._destinations) - 1
+        self._field_errors[f"destination_{new_index}"] = ""
+        self.fieldErrorsChanged.emit()
         self.destinationsChanged.emit()
 
     @Slot(int)
     def removeDestination(self, index):
         if len(self._destinations) > 1 and 0 < index < len(self._destinations):
             self._destinations.pop(index)
+            self._field_errors.pop(f"destination_{index}", None)
+            self.fieldErrorsChanged.emit()
             self.destinationsChanged.emit()
 
     @Slot(int, str)
@@ -295,6 +304,41 @@ class DzSaveController(QObject):
         except ValueError as error:
             QMessageBox.critical(None, "Check settings", str(error))
             return
+
+        ok, message = common.check_resources(self._destinations)
+        if not ok:
+            QMessageBox.warning(None, "Insufficient resources", message)
+            return
+
+        # Ask how to handle WSI files that already have a complete DeepZoom
+        # + thumbnail in the primary destination, before starting conversion.
+        existing, total = common.count_existing_conversions(
+            settings, self._selected_files()
+        )
+        if existing > 0:
+            box = QMessageBox(
+                QMessageBox.Icon.Warning,
+                "DeepZoom output already exists",
+                (
+                    f"{existing} of {total} selected WSI file(s) already have a "
+                    "complete DeepZoom + thumbnail in the primary destination. "
+                    "Choose how to handle them before starting conversion."
+                ),
+                QMessageBox.StandardButton.Cancel,
+                None,
+            )
+            overwrite_btn = box.addButton(
+                "Overwrite All", QMessageBox.ButtonRole.YesRole
+            )
+            box.addButton("Skip All", QMessageBox.ButtonRole.NoRole)
+            box.setDefaultButton(overwrite_btn)
+            box.setEscapeButton(box.button(QMessageBox.StandardButton.Cancel))
+            box.exec()
+            if box.clickedButton() is box.button(
+                QMessageBox.StandardButton.Cancel
+            ):
+                return
+            settings["force_overwrite"] = box.clickedButton() is overwrite_btn
 
         self._set_busy(True)
         self._progress = 0

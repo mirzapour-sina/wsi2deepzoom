@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QKeySequence, QColor, QPalette
+from PyQt6.QtGui import QColor, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QShortcut,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -649,6 +648,43 @@ class DzSaveWindow(QMainWindow):
         except ValueError as error:
             QMessageBox.critical(self, "Check settings", str(error))
             return
+
+        ok, message = common.check_resources(
+            [field.text() for field in self.destination_fields]
+        )
+        if not ok:
+            QMessageBox.warning(self, "Insufficient resources", message)
+            return
+
+        # Ask how to handle WSI files that already have a complete DeepZoom
+        # + thumbnail in the primary destination, before starting conversion.
+        existing, total = common.count_existing_conversions(
+            settings, self._selected_files()
+        )
+        if existing > 0:
+            box = QMessageBox(
+                QMessageBox.Icon.Warning,
+                "DeepZoom output already exists",
+                (
+                    f"{existing} of {total} selected WSI file(s) already have a "
+                    "complete DeepZoom + thumbnail in the primary destination. "
+                    "Choose how to handle them before starting conversion."
+                ),
+                QMessageBox.StandardButton.Cancel,
+                self,
+            )
+            overwrite_btn = box.addButton(
+                "Overwrite All", QMessageBox.ButtonRole.YesRole
+            )
+            box.addButton("Skip All", QMessageBox.ButtonRole.NoRole)
+            box.setDefaultButton(overwrite_btn)
+            box.setEscapeButton(box.button(QMessageBox.StandardButton.Cancel))
+            box.exec()
+            if box.clickedButton() is box.button(
+                QMessageBox.StandardButton.Cancel
+            ):
+                return
+            settings["force_overwrite"] = box.clickedButton() is overwrite_btn
 
         self._set_busy(True)
         self.progress.setRange(0, 1)

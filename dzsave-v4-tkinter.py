@@ -817,6 +817,33 @@ class DzSaveWindow:
             messagebox.showerror("Check settings", str(error))
             return
 
+        ok, message = common.check_resources(
+            [destination.get() for destination in self.destinations]
+        )
+        if not ok:
+            messagebox.showwarning("Insufficient resources", message)
+            return
+
+        # Ask how to handle WSI files that already have a complete DeepZoom
+        # + thumbnail in the primary destination, before starting conversion.
+        existing, total = common.count_existing_conversions(
+            settings, self._selected_files()
+        )
+        if existing > 0:
+            answer = messagebox.askyesnocancel(
+                "DeepZoom output already exists",
+                (
+                    f"{existing} of {total} selected WSI file(s) already have a "
+                    "complete DeepZoom + thumbnail in the primary destination.\n\n"
+                    "Yes = Overwrite all existing output.\n"
+                    "No = Skip all existing output.\n"
+                    "Cancel = Abort conversion."
+                ),
+            )
+            if answer is None:
+                return
+            settings["force_overwrite"] = bool(answer)
+
         self._scroll_to_widget(self.progress_frame)
         self._set_busy(True)
         self.progress.configure(maximum=1, value=0)

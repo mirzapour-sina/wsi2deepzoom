@@ -113,6 +113,14 @@ DESTINATION_DIRS = None
 PROGRESS_CALLBACK = None
 PROGRESS_FILE_INDEX = 0
 PROGRESS_FILE_TOTAL = 0
+# Monotonic count of slides that have fully completed (success or error).
+# Shared across the ThreadPoolExecutor worker threads and the main thread,
+# so it is guarded by a lock.
+PROGRESS_COMPLETED_FILES = 0
+_PROGRESS_LOCK = threading.Lock()
+# When True, existing DeepZoom + thumbnail output is always replaced instead
+# of skipped. Set by the GUI before a run starts (from settings["force_overwrite"]).
+FORCE_OVERWRITE = False
 LAST_CONVERSION_ERROR = None
 LAST_CONVERSION_DURATION = None
 LAST_CONVERSION_METRICS = {}
@@ -138,6 +146,8 @@ def reset_cancel():
 
 def report_progress(stage, current, total, input_file=None, message="", metrics=None):
     if PROGRESS_CALLBACK is not None:
+        with _PROGRESS_LOCK:
+            completed = PROGRESS_COMPLETED_FILES
         PROGRESS_CALLBACK(
             {
                 "stage": stage,
@@ -148,11 +158,10 @@ def report_progress(stage, current, total, input_file=None, message="", metrics=
                 "message": message,
                 "file_index": PROGRESS_FILE_INDEX,
                 "files_total": PROGRESS_FILE_TOTAL,
-                "completed_files": (
-                    PROGRESS_FILE_INDEX
-                    if stage in {"complete", "error", "finished"}
-                    else max(0, PROGRESS_FILE_INDEX - 1)
-                ),
+                # completed_files is a real monotonic count of finished slides,
+                # not derived from the shared PROGRESS_FILE_INDEX (which races
+                # across concurrent ThreadPoolExecutor workers).
+                "completed_files": completed,
                 "metrics": copy.deepcopy(metrics or {}),
                 "run_elapsed_seconds": (
                     time.perf_counter() - RUN_START_PERF
@@ -219,7 +228,7 @@ def deepzoom_exists(output_path: Path, output_format=None):
     output_format = output_format or DEEPZOOM_FORMAT
     storage_path = deepzoom_storage_path(output_path, output_format)
     if output_format == "dzi":
-        tiles_folder = Path(str(output_path) + "_files")
+        tiles_folder = Path(str(storage_path) + "_files")
         return (
             storage_path.is_file()
             and tiles_folder.exists()
@@ -318,8 +327,8 @@ def copy_deepzoom(
         if not source_storage.is_file():
             raise FileNotFoundError(f"DeepZoom output not found:\n{source_storage}")
         if output_format == "dzi":
-            source_tiles = Path(str(source_path) + "_files")
-            destination_tiles = Path(str(destination_path) + "_files")
+            source_tiles = Path(str(source_storage) + "_files")
+            destination_tiles = Path(str(destination_storage) + "_files")
             if not source_tiles.is_dir():
                 raise FileNotFoundError(
                     f"Source tiles directory not found:\n{source_tiles}"
@@ -540,7 +549,7 @@ def convert_wsi(
             primary_folder
         )
 
-        if dz_exists and thumb_exists:
+        if not FORCE_OVERWRITE and dz_exists and thumb_exists:
             metrics["deepzoom_status"] = "Skipped (already exists)"
             metrics["thumbnail_status"] = "Skipped (already exists)"
             report_progress(
@@ -1130,6 +1139,8 @@ def main():
                 break
             pending.discard(future)
             item = future.result()
+            with _PROGRESS_LOCK:
+                PROGRESS_COMPLETED_FILES += 1
             current = item["current"]
             input_file = item["input_file"]
             elapsed = item["elapsed"]

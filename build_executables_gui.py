@@ -49,7 +49,10 @@ class ExecutableBuilderWindow:
         self.root = root
         self.events = queue.Queue()
         self.busy = False
+        self.total_jobs = 0
+        self.completed_jobs = 0
         self.vips_bin = tk.StringVar()
+        self.percent = tk.StringVar(value="0%")
         self.status = tk.StringVar(value="Choose build options to get started.")
         self.method_vars = {
             method: tk.BooleanVar(value=True) for method in builder.METHODS
@@ -74,6 +77,7 @@ class ExecutableBuilderWindow:
         main.pack(fill=tk.BOTH, expand=True)
         main.columnconfigure(0, weight=1)
         main.rowconfigure(3, weight=1)
+        main.rowconfigure(6, weight=1)
 
         ttk.Label(
             main,
@@ -146,9 +150,19 @@ class ExecutableBuilderWindow:
         )
         self.build_button.grid(row=0, column=1, sticky="e")
 
+        progress = ttk.Frame(main)
+        progress.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        progress.columnconfigure(1, weight=1)
+        ttk.Label(progress, textvariable=self.percent).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.progress = ttk.Progressbar(
+            progress, orient=tk.HORIZONTAL, mode="determinate"
+        )
+        self.progress.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
         output_frame = ttk.LabelFrame(main, text="Build output", padding=6)
-        output_frame.grid(row=5, column=0, sticky="nsew")
-        main.rowconfigure(5, weight=1)
+        output_frame.grid(row=6, column=0, sticky="nsew")
         output_frame.columnconfigure(0, weight=1)
         output_frame.rowconfigure(0, weight=1)
         self.output = tk.Text(
@@ -260,6 +274,11 @@ class ExecutableBuilderWindow:
         ):
             return
 
+        self.total_jobs = len(jobs)
+        self.completed_jobs = 0
+        self.progress.configure(maximum=len(jobs))
+        self.progress["value"] = 0
+        self.percent.set("0%")
         self.busy = True
         self.build_button.configure(state=tk.DISABLED)
         self._append_output(
@@ -333,6 +352,7 @@ class ExecutableBuilderWindow:
                 except (OSError, RuntimeError) as error:
                     failures.append((description, str(error)))
                     self.events.put(("output", f"BUILD FAILED: {error}\n"))
+                self.events.put(("progress", index, len(jobs)))
         finally:
             self.events.put(("finished", (successes, failures, len(skipped))))
 
@@ -344,8 +364,18 @@ class ExecutableBuilderWindow:
                     self._append_output(payload)
                 elif event == "status":
                     self.status.set(payload)
+                elif event == "progress":
+                    completed, total = payload
+                    self.completed_jobs = completed
+                    self.progress["value"] = completed
+                    if total:
+                        self.percent.set(
+                            f"{completed / total * 100:.0f}% ({completed} of {total})"
+                        )
                 elif event == "finished":
                     successes, failures, skipped = payload
+                    self.progress["value"] = self.total_jobs
+                    self.percent.set("100%")
                     self.busy = False
                     self.build_button.configure(state=tk.NORMAL)
                     self.status.set(

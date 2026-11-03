@@ -1,0 +1,2 @@
+- [GUI QML-UX port results](gui-ux-port-results.md) — Porting QML reference UX to tkinter/PySide6/PyQt6 GUIs and verification results
+- [Session plan](session-plan.md) — Plan and status for syncing widget GUIs to QML reference and checking UX

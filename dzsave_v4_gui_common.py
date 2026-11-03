@@ -2,9 +2,11 @@ from pathlib import Path
 import importlib.util
 import os
 import queue
+import shutil
 import sys
 import threading
 import webbrowser
+import ctypes
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 
@@ -101,6 +103,87 @@ def find_wsi_files(input_dir, extensions=None):
             tuple(extension.lower() for extension in extensions)
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Resource guards
+# ---------------------------------------------------------------------------
+
+# Minimum resources required before a conversion may start.
+MIN_AVAILABLE_MEMORY_MB = 1024   # 1 GB of free physical memory
+MIN_FREE_DISK_MB = 1024          # 1 GB of free disk space per destination
+
+
+def available_memory_mb():
+    """Return available physical memory in MB, or None when it cannot be read."""
+    try:
+        import psutil  # type: ignore
+
+        return psutil.virtual_memory().available // (1024 * 1024)
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return stat.ullAvailPhys // (1024 * 1024)
+        except Exception:
+            pass
+    return None
+
+
+def free_disk_mb(path):
+    """Return free disk space in MB for the drive holding *path*, or None."""
+    try:
+        return shutil.disk_usage(str(path)).free // (1024 * 1024)
+    except (OSError, ValueError):
+        return None
+
+
+def check_resources(destinations):
+    """Return ``(ok, message)``.
+
+    ``ok`` is False when there is not enough memory or disk space to start a
+    conversion, with *message* describing the shortfall for the UI to show.
+    """
+    problems = []
+    mem = available_memory_mb()
+    if mem is not None and mem < MIN_AVAILABLE_MEMORY_MB:
+        problems.append(
+            f"Available memory: {mem:,} MB (need at least "
+            f"{MIN_AVAILABLE_MEMORY_MB:,} MB)."
+        )
+    for destination in destinations:
+        destination = Path(destination).expanduser()
+        parent = destination if destination.exists() else destination.parent
+        free = free_disk_mb(parent)
+        if free is not None and free < MIN_FREE_DISK_MB:
+            problems.append(
+                f"Free space at {destination}: {free:,} MB (need at least "
+                f"{MIN_FREE_DISK_MB:,} MB)."
+            )
+    if problems:
+        return (
+            False,
+            "Insufficient resources to start conversion:\n\n"
+            + "\n".join(problems),
+        )
+    return True, ""
 
 
 def validate_settings(values, selected_files=None, destinations=None):
@@ -272,6 +355,7 @@ def run_conversion(settings, events):
                     converter.SELECTED_FILES = settings.get("selected_files")
                     converter.WSI_EXTENSIONS = settings["wsi_extensions"]
                     converter.DEEPZOOM_FORMAT = settings["deepzoom_format"]
+                    converter.FORCE_OVERWRITE = settings.get("force_overwrite", False)
                     converter.PROGRESS_CALLBACK = lambda progress: events.put(
                         ("progress", progress)
                     )
@@ -314,6 +398,75 @@ def run_conversion(settings, events):
             events.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Existing-conversion detection (pre-start overwrite / skip prompt)
+# ---------------------------------------------------------------------------
+#
+# These mirror the storage / existence logic in dzsave_v4.py but are kept
+# self-contained (no pyvips import) so they can run before conversion even
+# when libvips is not installed.
+
+
+def _deepzoom_storage_path(output_path, output_format="dzi"):
+    if output_format in {"dzi", "szi", "zip"}:
+        return Path(f"{output_path}.{output_format}")
+    return Path(output_path)
+
+
+def deepzoom_exists(output_path, output_format="dzi"):
+    """Return True when a complete DeepZoom output already exists."""
+    storage_path = _deepzoom_storage_path(output_path, output_format)
+    if output_format == "dzi":
+        tiles_folder = Path(str(storage_path) + "_files")
+        return (
+            storage_path.is_file()
+            and tiles_folder.exists()
+            and tiles_folder.is_dir()
+        )
+    if output_format in {"szi", "zip"}:
+        return storage_path.is_file()
+    return storage_path.is_dir() and any(storage_path.iterdir())
+
+
+def thumbnail_exists(output_folder):
+    """Return True when a gallery thumbnail already exists in the folder."""
+    thumbnail_path = Path(output_folder) / "thumbnail.jpg"
+    return thumbnail_path.exists() and thumbnail_path.is_file()
+
+
+def count_existing_conversions(settings, selected_files=None):
+    """Return ``(existing_count, total_count)``.
+
+    Counts how many of the WSI files to convert already have a complete
+    DeepZoom + thumbnail in the primary destination, so the GUI can ask the
+    user whether to overwrite or skip before starting the run.
+    """
+    input_dir = Path(settings["input_dir"]).expanduser()
+    destinations = settings["destinations"]
+    primary = destinations[0]
+    deepzoom_format = str(settings.get("deepzoom_format", "dzi")).strip().lower()
+
+    if selected_files is None:
+        files = find_wsi_files(input_dir, settings.get("wsi_extensions", ""))
+    else:
+        files = [Path(path) for path in selected_files]
+
+    existing = 0
+    for file_path in files:
+        try:
+            rel_path = file_path.relative_to(input_dir.resolve())
+        except ValueError:
+            rel_path = Path(file_path.name)
+        rel_folder = rel_path.parent
+        folder_name = str(rel_folder) if str(rel_folder) != "." else file_path.stem
+        primary_output = primary / folder_name / file_path.stem
+        if deepzoom_exists(primary_output, deepzoom_format) and thumbnail_exists(
+            primary / folder_name
+        ):
+            existing += 1
+    return existing, len(files)
 
 
 def _markdown_cell(value):
